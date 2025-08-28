@@ -1,27 +1,32 @@
-// server.mjs — complete file
+// server.mjs — minimal token server + static client delivery
 
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config();
+
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-// Resolve __dirname for ES modules
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const app = express();
 
-// Lightweight CORS so the demo UI works anywhere
+// Basic CORS for the client page + fetches
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   next();
 });
 
-// Serve static files from the repo root (so /client.html works)
-app.use(express.static(__dirname));
+app.use(express.json());
 
-// Token endpoint: gets a short-lived client_secret from OpenAI
+// Resolve local file paths
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Serve the client at both "/" and "/client.html"
+app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'client.html')));
+app.get('/client.html', (_req, res) => res.sendFile(path.join(__dirname, 'client.html')));
+
+// Token/session endpoint called by the browser
 app.get('/session', async (_req, res) => {
   try {
     const r = await fetch('https://api.openai.com/v1/realtime/sessions', {
@@ -31,34 +36,51 @@ app.get('/session', async (_req, res) => {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: process.env.REALTIME_MODEL || 'gpt-4o-realtime-preview',
+        model: 'gpt-4o-realtime-preview',
         voice: 'alloy',
         modalities: ['audio', 'text'],
-        input_audio_transcription: { model: 'gpt-4o-transcribe' }
+        input_audio_format: 'pcm16',
+        output_audio_format: 'pcm16',
+        input_audio_transcription: { model: 'gpt-4o-transcribe' },
+        tools: [
+          {
+            type: 'function',
+            name: 'create_reminder',
+            description: 'Create a reminder with natural language time',
+            parameters: {
+              type: 'object',
+              properties: {
+                text: { type: 'string' },
+                when: { type: 'string' }
+              },
+              required: ['text', 'when']
+            }
+          }
+        ],
+        turn_detection: {
+          type: 'server_vad',
+          threshold: 0.5,
+          prefix_padding_ms: 300,
+          silence_duration_ms: 200,
+          create_response: true,
+          interrupt_response: true
+        }
       })
     });
 
-    const data = await r.json();
-    if (!r.ok) {
-      // Bubble up OpenAI error details to the browser
-      res.status(r.status).json(data);
-      return;
-    }
-    res.json(data);
+    const json = await r.json();
+    if (!r.ok) return res.status(r.status).json(json);
+    res.json(json);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: String(err) });
   }
 });
 
-// Optional convenience: open root path to the UI
-app.get('/', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'client.html'));
-});
-
-// Render sets PORT in env; default to 8080 locally
+// Render provides PORT; default to 8080 locally
 const port = process.env.PORT || 8080;
 app.listen(port, () => {
-  console.log(`Session server on :${port}`);
+  console.log(`Session server on http://localhost:${port}`);
 });
 
 

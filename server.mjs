@@ -1,15 +1,16 @@
-// server.mjs — minimal token server + static client delivery
+// server.mjs — robust static serving + token endpoint for Render
 
 import dotenv from 'dotenv';
 dotenv.config();
 
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const app = express();
 
-// Basic CORS for the client page + fetches
+// --- CORS so the client can call /session ---
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -18,15 +19,34 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
-// Resolve local file paths
+// --- Paths ---
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Serve the client at both "/" and "/client.html"
-app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'client.html')));
-app.get('/client.html', (_req, res) => res.sendFile(path.join(__dirname, 'client.html')));
+// Serve static files from root AND (if present) from /client
+app.use(express.static(__dirname));
+const clientDir = path.join(__dirname, 'client');
+if (fs.existsSync(clientDir)) {
+  app.use(express.static(clientDir));
+}
 
-// Token/session endpoint called by the browser
+// Resolve where client.html actually is
+function resolveClientHtml() {
+  const rootClient = path.join(__dirname, 'client.html');
+  const nestedClient = path.join(clientDir, 'client.html');
+  if (fs.existsSync(rootClient)) return rootClient;
+  if (fs.existsSync(nestedClient)) return nestedClient;
+  return null;
+}
+
+// Serve the UI
+app.get(['/', '/client.html'], (_req, res) => {
+  const file = resolveClientHtml();
+  if (!file) return res.status(404).send('client.html not found in repo');
+  res.sendFile(file);
+});
+
+// --- Token/session endpoint ---
 app.get('/session', async (_req, res) => {
   try {
     const r = await fetch('https://api.openai.com/v1/realtime/sessions', {
@@ -77,7 +97,7 @@ app.get('/session', async (_req, res) => {
   }
 });
 
-// Render provides PORT; default to 8080 locally
+// --- Start ---
 const port = process.env.PORT || 8080;
 app.listen(port, () => {
   console.log(`Session server on http://localhost:${port}`);

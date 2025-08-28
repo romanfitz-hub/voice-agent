@@ -1,142 +1,62 @@
+// server.mjs — complete file
 
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Realtime Voice Agent</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:20px}
-    h1{margin:0 0 12px}
-    button{padding:10px 14px;margin:6px 6px 6px 0;font-size:15px;border:1px solid #ddd;border-radius:8px;background:#f7f7f7;cursor:pointer}
-    button:disabled{opacity:.6;cursor:not-allowed}
-    #status{font-weight:600}
-    #log{white-space:pre-wrap;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;border:1px solid #eee;border-radius:8px;padding:12px;background:#fafafa;max-height:55vh;overflow:auto;margin-top:14px}
-    audio{display:block;width:100%;max-width:520px;margin:8px 0}
-    select{padding:8px;border-radius:8px;border:1px solid #ddd}
-  </style>
-</head>
-<body>
-  <h1>Realtime Voice Agent</h1>
+import 'dotenv/config';
+import express from 'express';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-  <div>
-    <button id="start">Start voice agent</button>
-    <button id="stop" disabled>Stop</button>
-    <button id="force" disabled>Force reply</button>
-    <button id="hello" disabled>Say hello</button>
-    <button id="beep">Test sound</button>
-    <label style="margin-left:10px">Output: <select id="sinks"></select></label>
-  </div>
+// Resolve __dirname for ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-  <p>Status: <span id="status">idle</span></p>
-  <p>Audio element: <span id="audiostate">paused</span></p>
-  <audio id="remote" autoplay></audio>
-  <div id="log"></div>
+const app = express();
 
-  <script>
-    // IMPORTANT: for cloud hosting we call our own server on the same origin
-    const SESSION_URL = '/session'; // <-- do not change
+// Lightweight CORS so the demo UI works anywhere
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  next();
+});
 
-    const statusEl = document.getElementById('status');
-    const audioEl  = document.getElementById('remote');
-    const audioStateEl = document.getElementById('audiostate');
-    const logEl    = document.getElementById('log');
-    const sinksSel = document.getElementById('sinks');
-    const btnStart = document.getElementById('start');
-    const btnStop  = document.getElementById('stop');
-    const btnForce = document.getElementById('force');
-    const btnHello = document.getElementById('hello');
-    const btnBeep  = document.getElementById('beep');
+// Serve static files from the repo root (so /client.html works)
+app.use(express.static(__dirname));
 
-    function setStatus(s){ statusEl.textContent = s; }
-    function setAudioState(s){ audioStateEl.textContent = s; }
-    function log(msg){ logEl.textContent += (msg + "\n"); logEl.scrollTop = logEl.scrollHeight; }
-
-    // Populate audio output devices (desktop Chrome supports setSinkId; iOS ignores it)
-    async function refreshSinks() {
-      try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const outs = devices.filter(d => d.kind === 'audiooutput');
-        sinksSel.innerHTML = '';
-        outs.forEach((d,i) => {
-          const opt = document.createElement('option');
-          opt.value = d.deviceId;
-          opt.textContent = (d.label || `Speaker ${i+1}`);
-          sinksSel.appendChild(opt);
-        });
-      } catch {}
-    }
-    sinksSel.addEventListener('change', async () => {
-      if (typeof audioEl.setSinkId === 'function' && sinksSel.value) {
-        try { await audioEl.setSinkId(sinksSel.value); } catch(e){ log('setSinkId error: '+e.message); }
-      }
+// Token endpoint: gets a short-lived client_secret from OpenAI
+app.get('/session', async (_req, res) => {
+  try {
+    const r = await fetch('https://api.openai.com/v1/realtime/sessions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: process.env.REALTIME_MODEL || 'gpt-4o-realtime-preview',
+        voice: 'alloy',
+        modalities: ['audio', 'text'],
+        input_audio_transcription: { model: 'gpt-4o-transcribe' }
+      })
     });
 
-    // Simple beep test to verify your phone/PC can play audio from this page
-    btnBeep.onclick = async () => {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const o = ctx.createOscillator(); const g = ctx.createGain();
-      o.type = 'sine'; o.frequency.value = 880; g.gain.value = 0.1;
-      o.connect(g).connect(ctx.destination); o.start(); setTimeout(()=>o.stop(), 300);
-      log('beep played');
-    };
+    const data = await r.json();
+    if (!r.ok) {
+      // Bubble up OpenAI error details to the browser
+      res.status(r.status).json(data);
+      return;
+    }
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
 
-    let pc, eventsDc, micStream, analyser, rafId;
+// Optional convenience: open root path to the UI
+app.get('/', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'client.html'));
+});
 
-    async function start() {
-      btnStart.disabled = true; btnStop.disabled = false; btnForce.disabled = true; btnHello.disabled = true;
-      setStatus('requesting mic…');
-
-      // 1) get mic
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      // 2) peer connection
-      pc = new RTCPeerConnection({iceServers:[]});
-
-      // 3) play remote audio
-      pc.ontrack = (e) => {
-        audioEl.srcObject = e.streams[0];
-        audioEl.play().then(()=>setAudioState('playing')).catch(()=>setAudioState('paused'));
-        log('ontrack: got remote audio');
-        // analyser to show "audio peak" lines
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
-        const src = ctx.createMediaStreamSource(e.streams[0]);
-        analyser = ctx.createAnalyser(); analyser.fftSize = 256; src.connect(analyser);
-        const data = new Uint8Array(analyser.frequencyBinCount);
-        const loop = () => { analyser.getByteTimeDomainData(data); let peak=0; for (let i=0;i<data.length;i++){ peak=Math.max(peak, data[i]); } log('audio peak '+peak); rafId = requestAnimationFrame(loop); };
-        rafId = requestAnimationFrame(loop);
-      };
-
-      pc.onconnectionstatechange = () => { log('pc state: ' + pc.connectionState); };
-
-      // 4) events data channel
-      eventsDc = pc.createDataChannel('oai-events');
-      eventsDc.onopen  = () => { log('events channel open'); btnForce.disabled=false; btnHello.disabled=false; };
-      eventsDc.onclose = () => { log('events channel closed'); };
-
-      // 5) send mic to PC
-      micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
-
-      // 6) prefer opus
-      const transceiver = pc.getTransceivers().find(t => t.receiver && t.receiver.track && t.receiver.track.kind === 'audio');
-      log('codec preference: opus first');
-
-      // 7) create offer
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      // 8) get ephemeral client secret from our server
-      const sessRes = await fetch(SESSION_URL, { method:'POST' });
-      if (!sessRes.ok) throw new Error('session failed: '+(await sessRes.text()));
-      const sess = await sessRes.json();
-      if (!sess.client_secret || !sess.client_secret.value) throw new Error('no client secret');
-
-      // 9) send SDP to OpenAI Realtime
-      const model = (sess.model || 'gpt-4o-realtime-preview');
-      const sdpRes = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
-
-
-
-
-
-
-
+// Render sets PORT in env; default to 8080 locally
+const port = process.env.PORT || 8080;
+app.listen(port, () => {
+  console.log(`Session server on :${port}`);
+});

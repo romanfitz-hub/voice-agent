@@ -1,62 +1,187 @@
-// server.mjs — complete file
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Realtime Voice Agent</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font: 16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 20px; }
+    h1 { margin: 0 0 16px; }
+    button { padding: 10px 14px; margin: 6px 8px 12px 0; font-size: 15px; }
+    #log { background:#f6f8fa; border:1px solid #e1e4e8; padding:10px; min-height:160px; white-space:pre-wrap; }
+    #status { font-weight:600; margin: 6px 0 10px; }
+    audio { width: 100%; margin: 8px 0 16px; }
+    select { margin-left: 10px; }
+  </style>
+</head>
+<body>
+  <h1>Realtime Voice Agent</h1>
 
-import 'dotenv/config';
-import express from 'express';
-import path from 'path';
-import { fileURLToPath } from 'url';
+  <button id="start">Start voice agent</button>
+  <button id="stop" disabled>Stop</button>
+  <button id="force" disabled>Force reply</button>
+  <button id="test">Test sound</button>
+  <label>Output:
+    <select id="sinks"></select>
+  </label>
 
-// Resolve __dirname for ES modules
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+  <p id="status">Status: idle</p>
+  <p id="audiostate">Audio element: paused</p>
+  <audio id="remote" autoplay></audio>
+  <div id="log"></div>
 
-const app = express();
+<script>
+(async () => {
+  const el = s => document.querySelector(s);
+  const logEl = el('#log');
+  const setStatus = t => el('#status').textContent = 'Status: ' + t;
+  const setAudioState = t => el('#audiostate').textContent = 'Audio element: ' + t;
+  const log = (...a) => { logEl.textContent += a.join(' ') + "\n"; logEl.scrollTop = logEl.scrollHeight; };
 
-// Lightweight CORS so the demo UI works anywhere
-app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  next();
-});
+  const remoteAudio = el('#remote');
+  remoteAudio.addEventListener('play',  () => setAudioState('playing'));
+  remoteAudio.addEventListener('pause', () => setAudioState('paused'));
 
-// Serve static files from the repo root (so /client.html works)
-app.use(express.static(__dirname));
+  // Populate output devices (if supported)
+  const sinksSel = el('#sinks');
+  async function refreshSinks() {
+    sinksSel.innerHTML = '';
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const outs = devices.filter(d => d.kind === 'audiooutput');
+      outs.forEach((d,i) => {
+        const opt = document.createElement('option');
+        opt.value = d.deviceId;
+        opt.textContent = (i===0?'Default - ':'') + (d.label || `Speaker ${i+1}`);
+        sinksSel.appendChild(opt);
+      });
+    } catch {}
+  }
+  await refreshSinks();
+  sinksSel.onchange = async () => {
+    if (remoteAudio.sinkId !== undefined) {
+      try { await remoteAudio.setSinkId(sinksSel.value || ''); }
+      catch (e) { log('setSinkId error:', e?.message || e); }
+    }
+  };
 
-// Token endpoint: gets a short-lived client_secret from OpenAI
-app.get('/session', async (_req, res) => {
-  try {
-    const r = await fetch('https://api.openai.com/v1/realtime/sessions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: process.env.REALTIME_MODEL || 'gpt-4o-realtime-preview',
-        voice: 'alloy',
-        modalities: ['audio', 'text'],
-        input_audio_transcription: { model: 'gpt-4o-transcribe' }
-      })
+  let pc, dc, micStream;
+
+  async function start() {
+    setStatus('requesting mic…');
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    pc = new RTCPeerConnection({ 
+      // prefer Opus from the server for lower latency on the web
+      // (the model will send Opus first when available)
+      // nothing special needed here for browser
     });
 
-    const data = await r.json();
-    if (!r.ok) {
-      // Bubble up OpenAI error details to the browser
-      res.status(r.status).json(data);
-      return;
+    // Show remote audio
+    pc.ontrack = (e) => {
+      remoteAudio.srcObject = e.streams[0];
+      remoteAudio.play().catch(()=>{});
+      log('ontrack: got remote audio');
+    };
+
+    // (Optional) simple meter: watch audio energy
+    const ctx = new AudioContext();
+    const src = ctx.createMediaStreamSource(micStream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    src.connect(analyser);
+    const meter = () => {
+      analyser.getByteTimeDomainData(data);
+      log('audio peak', Math.max(...data));
+      if (pc && pc.connectionState !== 'closed') requestAnimationFrame(meter);
+    };
+    meter();
+
+    // Send mic to PC
+    micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
+
+    // Events channel from model (text/status)
+    dc = pc.createDataChannel('oai-events');
+    dc.onopen = () => log('events channel open');
+    dc.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'response.created') log('event: response.created');
+        if (msg.type === 'response.done')    log('event: response.done');
+      } catch { log('event:', e.data); }
+    };
+
+    pc.onconnectionstatechange = () => setStatus(pc.connectionState);
+
+    // 1) Get a short-lived client_secret from our server
+    const sess = await fetch('/session').then(r => r.json());
+    if (sess.error) throw new Error(sess.error?.message || 'session error');
+
+    // 2) Offer/answer over HTTPS with OpenAI Realtime using that secret
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const sdpResp = await fetch('https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ' + (sess.client_secret?.value || ''),
+        'Content-Type': 'application/sdp'
+      },
+      body: offer.sdp
+    });
+
+    if (!sdpResp.ok) {
+      const errTxt = await sdpResp.text();
+      throw new Error('SDP error: ' + errTxt.slice(0, 400));
     }
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: String(err) });
+
+    const answer = { type: 'answer', sdp: await sdpResp.text() };
+    await pc.setRemoteDescription(answer);
+
+    // Kick the audio element
+    remoteAudio.play().catch(()=>{});
+    setStatus('connected');
+
+    // Button wiring
+    el('#force').disabled = false;
+    el('#force').onclick = () => {
+      if (!dc || dc.readyState !== 'open') return;
+      dc.send(JSON.stringify({ type: 'response.create', response: { instructions: 'Say hello!' } }));
+      log('forced reply');
+    };
   }
-});
 
-// Optional convenience: open root path to the UI
-app.get('/', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'client.html'));
-});
+  async function stop() {
+    setStatus('stopping…');
+    try { dc?.close(); } catch {}
+    try { pc?.close(); } catch {}
+    try { micStream?.getTracks().forEach(t => t.stop()); } catch {}
+    el('#force').disabled = true;
+    el('#stop').disabled = true;
+    el('#start').disabled = false;
+    setStatus('stopped');
+  }
 
-// Render sets PORT in env; default to 8080 locally
-const port = process.env.PORT || 8080;
-app.listen(port, () => {
-  console.log(`Session server on :${port}`);
-});
+  el('#start').onclick = async () => {
+    el('#start').disabled = true;
+    el('#stop').disabled = false;
+    try { await start(); }
+    catch (e) { setStatus('error'); log('error:', e.message || e); el('#start').disabled = false; el('#stop').disabled = true; }
+  };
+
+  el('#stop').onclick = stop;
+
+  el('#test').onclick = async () => {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.frequency.value = 880; gain.gain.value = 0.05;
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(); setTimeout(() => { osc.stop(); ctx.close(); }, 500);
+    log('beep played');
+  };
+})();
+</script>
+</body>
+</html>

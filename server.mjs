@@ -1,29 +1,27 @@
-// server.mjs — full file (replace everything with this)
+// server.mjs — full file
 
-import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-// Optional Supabase (memory). Safe if not configured.
+// Optional Supabase (memory). Safe if not configured or package missing.
 let supabase = null;
 try {
   const { createClient } = await import('@supabase/supabase-js');
   if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
     supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
   }
-} catch { /* ignore if package not present */ }
+} catch {
+  // ignore if package not present
+}
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 
-// --- CORS (simple & permissive for browser UI) ---
+// CORS (simple)
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, X-Requested-With'
-  );
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
@@ -33,18 +31,18 @@ app.use((req, res, next) => {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-// --- Health check FIRST so it always works ---
+// Health FIRST
 app.get('/', (_req, res) => res.type('text/plain').send('ok'));
 
-// --- Serve UI explicitly ---
+// Serve UI explicitly
 app.get('/client.html', (_req, res) => {
   res.sendFile(path.join(__dirname, 'client.html'));
 });
 
-// Also serve any other static files from this folder (favicon, images, etc.)
+// Static files from repo root (favicon, etc.)
 app.use(express.static(__dirname));
 
-// --- OpenAI Realtime session token endpoint ---
+// OpenAI Realtime session token
 app.get('/session', async (_req, res) => {
   try {
     const apiKey = process.env.OPENAI_API_KEY;
@@ -62,11 +60,9 @@ app.get('/session', async (_req, res) => {
         model,
         voice: 'alloy',
         modalities: ['audio', 'text'],
-        // Audio in/out format your client.html expects:
         input_audio_format: 'pcm16',
         output_audio_format: 'pcm16',
         input_audio_transcription: { model: 'gpt-4o-transcribe' },
-        // Simple tool example (safe to leave here)
         tools: [
           {
             type: 'function',
@@ -74,10 +70,7 @@ app.get('/session', async (_req, res) => {
             description: 'Create a reminder with natural language time',
             parameters: {
               type: 'object',
-              properties: {
-                text: { type: 'string' },
-                when: { type: 'string' }
-              },
+              properties: { text: { type: 'string' }, when: { type: 'string' } },
               required: ['text', 'when']
             }
           }
@@ -106,8 +99,7 @@ app.get('/session', async (_req, res) => {
   }
 });
 
-// --- Tiny TTS test (optional) ---
-// GET /tts?text=Hello
+// Simple TTS check (optional): GET /tts?text=Hello
 app.get('/tts', async (req, res) => {
   try {
     const apiKey = process.env.OPENAI_API_KEY;
@@ -121,69 +113,8 @@ app.get('/tts', async (req, res) => {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini-tts',
-        voice: 'alloy',
-        input: text,
-        format: 'mp3'
-      })
-    });
+      body: JSON.stringify
 
-    if (!r.ok) {
-      const t = await r.text().catch(() => '');
-      return res.status(r.status).send(t || 'tts failed');
-    }
-
-    const buf = Buffer.from(await r.arrayBuffer());
-    res.setHeader('Content-Type', 'audio/mpeg');
-    res.send(buf);
-  } catch (err) {
-    console.error('TTS ERROR:', err);
-    res.status(500).send(String(err?.message || err));
-  }
-});
-
-// --- Memory endpoints (safe no-ops if Supabase not configured) ---
-app.get('/memory', async (_req, res) => {
-  try {
-    if (!supabase) return res.json({ ok: true, configured: false, items: [] });
-    const userId = process.env.DEFAULT_USER_ID || 'roman';
-    const { data, error } = await supabase
-      .from('memory')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(50);
-    if (error) throw error;
-    res.json({ ok: true, configured: true, items: data ?? [] });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
-  }
-});
-
-app.post('/memory', async (req, res) => {
-  try {
-    if (!supabase) return res.json({ ok: true, configured: false });
-    const userId = process.env.DEFAULT_USER_ID || 'roman';
-    const item = {
-      user_id: userId,
-      type: req.body?.type || 'note',
-      content: req.body?.content || '',
-      meta: req.body?.meta || null
-    };
-    const { data, error } = await supabase.from('memory').insert(item).select().single();
-    if (error) throw error;
-    res.json({ ok: true, configured: true, item: data });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
-  }
-});
-
-// --- Start server ---
-const port = process.env.PORT || 8090;
-app.listen(port, () => {
-  console.log(`Session server running on http://localhost:${port}`);
-});
 
 
 

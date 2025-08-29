@@ -2,186 +2,237 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover"
+  />
   <title>Realtime Voice Agent</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font: 16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding: 20px; }
-    h1 { margin: 0 0 16px; }
-    button { padding: 10px 14px; margin: 6px 8px 12px 0; font-size: 15px; }
-    #log { background:#f6f8fa; border:1px solid #e1e4e8; padding:10px; min-height:160px; white-space:pre-wrap; }
-    #status { font-weight:600; margin: 6px 0 10px; }
-    audio { width: 100%; margin: 8px 0 16px; }
-    select { margin-left: 10px; }
+    :root { color-scheme: light dark; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; margin: 24px; }
+    h1 { font-size: 32px; margin: 0 0 16px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+    button, select {
+      font-size: 16px; padding: 10px 14px; border-radius: 10px; border: 1px solid #8884;
+      background: #f6f6f6; cursor: pointer;
+    }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .pill { padding: 2px 8px; border-radius: 999px; background: #8881; font-size: 13px; }
+    #log {
+      min-height: 140px; border: 1px solid #8884; border-radius: 10px; padding: 12px;
+      background: #f8f8f8; white-space: pre-wrap; overflow: auto;
+    }
+    #status { font-weight: 700; }
+    .muted { opacity: .7; font-weight: 400; }
   </style>
 </head>
 <body>
   <h1>Realtime Voice Agent</h1>
 
-  <button id="start">Start voice agent</button>
-  <button id="stop" disabled>Stop</button>
-  <button id="force" disabled>Force reply</button>
-  <button id="test">Test sound</button>
-  <label>Output:
-    <select id="sinks"></select>
-  </label>
+  <div class="row">
+    <button id="start">Start voice agent</button>
+    <button id="stop"  disabled>Stop</button>
+    <button id="force" disabled>Force reply</button>
+    <button id="beep">Test sound</button>
+  </div>
 
-  <p id="status">Status: idle</p>
-  <p id="audiostate">Audio element: paused</p>
-  <audio id="remote" autoplay></audio>
+  <div class="row" style="align-items:center;">
+    <div class="muted">Output:</div>
+    <span class="pill" title="Toggles text output visibility" id="toggleOutput">⟳</span>
+  </div>
+
+  <div class="row">
+    <div><span class="muted">Status:</span> <span id="status">idle</span></div>
+  </div>
+
   <div id="log"></div>
 
-<script>
-(async () => {
-  const el = s => document.querySelector(s);
-  const logEl = el('#log');
-  const setStatus = t => el('#status').textContent = 'Status: ' + t;
-  const setAudioState = t => el('#audiostate').textContent = 'Audio element: ' + t;
-  const log = (...a) => { logEl.textContent += a.join(' ') + "\n"; logEl.scrollTop = logEl.scrollHeight; };
+  <!-- Audio sink for the remote stream -->
+  <audio id="agent-audio" autoplay playsinline></audio>
 
-  const remoteAudio = el('#remote');
-  remoteAudio.addEventListener('play',  () => setAudioState('playing'));
-  remoteAudio.addEventListener('pause', () => setAudioState('paused'));
+  <script>
+    // ---------- Small helpers ----------
+    const $ = s => document.querySelector(s);
+    const log = (...args) => {
+      const el = $("#log");
+      el.textContent += args.join(" ") + "\n";
+      el.scrollTop = el.scrollHeight;
+    };
+    const setStatus = (t) => $("#status").textContent = t;
 
-  // Populate output devices (if supported)
-  const sinksSel = el('#sinks');
-  async function refreshSinks() {
-    sinksSel.innerHTML = '';
-    try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const outs = devices.filter(d => d.kind === 'audiooutput');
-      outs.forEach((d,i) => {
-        const opt = document.createElement('option');
-        opt.value = d.deviceId;
-        opt.textContent = (i===0?'Default - ':'') + (d.label || `Speaker ${i+1}`);
-        sinksSel.appendChild(opt);
-      });
-    } catch {}
-  }
-  await refreshSinks();
-  sinksSel.onchange = async () => {
-    if (remoteAudio.sinkId !== undefined) {
-      try { await remoteAudio.setSinkId(sinksSel.value || ''); }
-      catch (e) { log('setSinkId error:', e?.message || e); }
-    }
-  };
+    // ---------- UI wiring ----------
+    const btnStart = $("#start");
+    const btnStop  = $("#stop");
+    const btnForce = $("#force");
+    const btnBeep  = $("#beep");
+    const audioEl  = $("#agent-audio");
 
-  let pc, dc, micStream;
+    let pc, dc, micStream, connected = false;
 
-  async function start() {
-    setStatus('requesting mic…');
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-    pc = new RTCPeerConnection({ 
-      // prefer Opus from the server for lower latency on the web
-      // (the model will send Opus first when available)
-      // nothing special needed here for browser
+    btnStart.addEventListener("click", startAgent);
+    btnStop.addEventListener("click", stopAgent);
+    btnForce.addEventListener("click", () => {
+      if (!dc || dc.readyState !== "open") return;
+      dc.send(JSON.stringify({ type: "response.create" }));
+      log("forced reply → response.create");
     });
+    btnBeep.addEventListener("click", localBeep);
 
-    // Show remote audio
-    pc.ontrack = (e) => {
-      remoteAudio.srcObject = e.streams[0];
-      remoteAudio.play().catch(()=>{});
-      log('ontrack: got remote audio');
-    };
+    function updateButtons() {
+      btnStart.disabled = connected;
+      btnStop.disabled  = !connected;
+      btnForce.disabled = !connected;
+    }
 
-    // (Optional) simple meter: watch audio energy
-    const ctx = new AudioContext();
-    const src = ctx.createMediaStreamSource(micStream);
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 256;
-    const data = new Uint8Array(analyser.frequencyBinCount);
-    src.connect(analyser);
-    const meter = () => {
-      analyser.getByteTimeDomainData(data);
-      log('audio peak', Math.max(...data));
-      if (pc && pc.connectionState !== 'closed') requestAnimationFrame(meter);
-    };
-    meter();
-
-    // Send mic to PC
-    micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
-
-    // Events channel from model (text/status)
-    dc = pc.createDataChannel('oai-events');
-    dc.onopen = () => log('events channel open');
-    dc.onmessage = (e) => {
+    // ---------- Local test beep (WebAudio) ----------
+    async function localBeep() {
       try {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'response.created') log('event: response.created');
-        if (msg.type === 'response.done')    log('event: response.done');
-      } catch { log('event:', e.data); }
-    };
-
-    pc.onconnectionstatechange = () => setStatus(pc.connectionState);
-
-    // 1) Get a short-lived client_secret from our server
-    const sess = await fetch('/session').then(r => r.json());
-    if (sess.error) throw new Error(sess.error?.message || 'session error');
-
-    // 2) Offer/answer over HTTPS with OpenAI Realtime using that secret
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    const sdpResp = await fetch('https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview', {
-      method: 'POST',
-      headers: {
-        Authorization: 'Bearer ' + (sess.client_secret?.value || ''),
-        'Content-Type': 'application/sdp'
-      },
-      body: offer.sdp
-    });
-
-    if (!sdpResp.ok) {
-      const errTxt = await sdpResp.text();
-      throw new Error('SDP error: ' + errTxt.slice(0, 400));
+        const ac = new (window.AudioContext || window.webkitAudioContext)();
+        const o = ac.createOscillator();
+        const g = ac.createGain();
+        o.type = "sine"; o.frequency.value = 880;
+        g.gain.value = 0.05;
+        o.connect(g).connect(ac.destination);
+        o.start();
+        setTimeout(() => { o.stop(); ac.close(); }, 180);
+        log("beep played");
+      } catch (_) {}
     }
 
-    const answer = { type: 'answer', sdp: await sdpResp.text() };
-    await pc.setRemoteDescription(answer);
+    // ---------- Start/Stop ----------
+    async function startAgent() {
+      if (connected) return;
 
-    // Kick the audio element
-    remoteAudio.play().catch(()=>{});
-    setStatus('connected');
+      setStatus("preparing…");
+      updateButtons();
 
-    // Button wiring
-    el('#force').disabled = false;
-    el('#force').onclick = () => {
-      if (!dc || dc.readyState !== 'open') return;
-      dc.send(JSON.stringify({ type: 'response.create', response: { instructions: 'Say hello!' } }));
-      log('forced reply');
-    };
-  }
+      try {
+        // 1) Get short-lived client_secret from our server
+        const tokenRes = await fetch("/session");
+        if (!tokenRes.ok) throw new Error("failed to fetch /session");
+        const { client_secret, model } = await tokenRes.json();
 
-  async function stop() {
-    setStatus('stopping…');
-    try { dc?.close(); } catch {}
-    try { pc?.close(); } catch {}
-    try { micStream?.getTracks().forEach(t => t.stop()); } catch {}
-    el('#force').disabled = true;
-    el('#stop').disabled = true;
-    el('#start').disabled = false;
-    setStatus('stopped');
-  }
+        // 2) Set up WebRTC
+        pc = new RTCPeerConnection();
 
-  el('#start').onclick = async () => {
-    el('#start').disabled = true;
-    el('#stop').disabled = false;
-    try { await start(); }
-    catch (e) { setStatus('error'); log('error:', e.message || e); el('#start').disabled = false; el('#stop').disabled = true; }
-  };
+        // Remote audio to element
+        pc.ontrack = (evt) => {
+          audioEl.srcObject = evt.streams[0];
+        };
 
-  el('#stop').onclick = stop;
+        // Data channel to send control events
+        dc = pc.createDataChannel("oai-events");
+        dc.onopen  = () => log("datachannel open");
+        dc.onclose = () => log("datachannel closed");
+        dc.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.type) log("event:", msg.type);
+          } catch {
+            log("event:", ev.data);
+          }
+        };
 
-  el('#test').onclick = async () => {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.frequency.value = 880; gain.gain.value = 0.05;
-    osc.connect(gain).connect(ctx.destination);
-    osc.start(); setTimeout(() => { osc.stop(); ctx.close(); }, 500);
-    log('beep played');
-  };
-})();
-</script>
+        // 3) Capture microphone and add tracks (send & receive audio)
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
+        pc.addTransceiver("audio", { direction: "recvonly" });
+
+        // 4) Create offer and send to OpenAI Realtime endpoint
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        const sdpResponse = await fetch(
+          "https://api.openai.com/v1/realtime?model=" + encodeURIComponent(model || "gpt-4o-realtime-preview-2024-12-17"),
+          {
+            method: "POST",
+            headers: {
+              "Authorization": "Bearer " + client_secret,
+              "Content-Type": "application/sdp"
+            },
+            body: offer.sdp
+          }
+        );
+
+        if (!sdpResponse.ok) {
+          throw new Error("realtime offer failed: " + sdpResponse.status);
+        }
+
+        const answerSdp = await sdpResponse.text();
+        await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+
+        connected = true;
+        setStatus("listening");
+        updateButtons();
+        log("connected to realtime model");
+      } catch (err) {
+        log("error:", err.message || err);
+        setStatus("error");
+        connected = false;
+        updateButtons();
+        cleanup();
+      }
+    }
+
+    async function stopAgent() {
+      cleanup();
+      connected = false;
+      updateButtons();
+      setStatus("idle");
+      log("stopped");
+    }
+
+    function cleanup() {
+      if (dc) { try { dc.close(); } catch {} dc = null; }
+      if (pc) { try { pc.close(); } catch {} pc = null; }
+      if (micStream) {
+        try { micStream.getTracks().forEach(t => t.stop()); } catch {}
+        micStream = null;
+      }
+    }
+
+    // ---------- AUTOSTART (hands-free via ?auto=1) ----------
+    (function autostart() {
+      const params = new URLSearchParams(location.search);
+      const shouldAuto = (params.get("auto") === "1" || params.get("autostart") === "1");
+      if (!shouldAuto) return;
+
+      // Prime mic permission (first run will show the system prompt)
+      try {
+        navigator.mediaDevices.getUserMedia({ audio: true })
+          .then(s => s.getTracks().forEach(t => t.stop()))
+          .catch(()=>{});
+      } catch (_) {}
+
+      // Nudge audio element for autoplay policies
+      if (audioEl) {
+        try {
+          audioEl.muted = true;
+          audioEl.playsInline = true;
+          audioEl.play && audioEl.play().catch(()=>{});
+          setTimeout(() => { audioEl.muted = false; }, 1200);
+        } catch (_) {}
+      }
+
+      // Try pressing the Start button repeatedly (covers timing & prompts)
+      function clickStart() {
+        const byId   = document.querySelector("#start");
+        const byText = [...document.querySelectorAll("button")]
+          .find(b => /start\s*voice\s*agent/i.test(b.textContent));
+        const btn = byId || byText;
+        if (btn && !btn.disabled) { btn.click(); return true; }
+        return false;
+      }
+
+      let tries = 0;
+      const iv = setInterval(() => {
+        tries++;
+        if (clickStart() || tries > 18) clearInterval(iv);
+      }, 600);
+
+      document.addEventListener("visibilitychange", () => { if (!document.hidden) clickStart(); });
+      window.addEventListener("focus", clickStart);
+    })();
+  </script>
 </body>
 </html>

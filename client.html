@@ -1,146 +1,149 @@
-<script>
-/* ---------- utilities ---------- */
-const $ = sel => document.querySelector(sel);
-const logBox = $('#log') || (function(){
-  const pre = document.createElement('pre');
-  pre.id = 'log';
-  pre.style.minHeight = '220px';
-  pre.style.padding = '12px';
-  pre.style.border = '1px solid #ddd';
-  pre.style.borderRadius = '8px';
-  pre.style.background = '#f7f7f7';
-  pre.style.whiteSpace = 'pre-wrap';
-  pre.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, monospace';
-  document.body.appendChild(pre);
-  return pre;
-})();
-function log(...args){ logBox.textContent += args.join(' ') + '\n'; }
-function setStatus(s){ const el = $('#status'); if (el) el.textContent = s; }
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Realtime Voice Agent</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+           margin: 24px; line-height: 1.4; }
+    h1 { font-size: 2.2rem; margin: 0 0 16px; }
+    button { font-size: 16px; padding: 10px 14px; border-radius: 10px; border: 1px solid #ccc; margin: 6px 10px 12px 0; }
+    #status { font-weight: 700; }
+    #log { min-height: 220px; padding: 12px; border: 1px solid #ddd; border-radius: 8px; background: #f7f7f7;
+           white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .row { margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <h1>Realtime Voice Agent</h1>
 
-/* ---------- params ---------- */
-const url = new URL(location.href);
-const AUTO = url.searchParams.get('auto') === '1';
-const DELAY = Number(url.searchParams.get('delay') || 1200); // ms
-const MODEL = 'gpt-4o-realtime-preview-2024-12-17'; // or your chosen realtime model
+  <div class="row">
+    <button id="start">Start voice agent</button>
+    <button id="stop">Stop</button>
+    <button id="ping" title="Force one reply">Force reply</button>
+    <button id="beep">Test sound</button>
+  </div>
 
-/* ---------- audio widgets ---------- */
-const audioEl = $('#audio') || (function(){
-  const a = document.createElement('audio');
-  a.id = 'audio';
-  a.autoplay = true;
-  a.playsInline = true;
-  document.body.appendChild(a);
-  return a;
-})();
+  <div class="row">
+    <strong>Output:</strong>
+    <button id="clear" title="Clear log">⟳</button>
+  </div>
 
-/* ---------- main connect with retry ---------- */
-async function startVoiceAgentOnce() {
-  setStatus('connecting…');
-  log('fetching client session…');
+  <div class="row"><strong>Status:</strong> <span id="status">idle</span></div>
 
-  // 1) get short-lived client_secret from our server
-  const sessRes = await fetch('/session', { method: 'POST' }).catch(e => { throw new Error('session fetch failed: '+e.message); });
-  if (!sessRes.ok) {
-    const t = await sessRes.text().catch(()=> '');
-    throw new Error(`session endpoint error ${sessRes.status} ${t}`);
-  }
-  const sess = await sessRes.json();
-  if (!sess?.client_secret?.value) throw new Error('no client_secret in /session response');
+  <audio id="audio" autoplay playsinline></audio>
+  <pre id="log"></pre>
 
-  // 2) set up WebRTC
-  const pc = new RTCPeerConnection();
-  const ms = await navigator.mediaDevices.getUserMedia({ audio: true });
-  for (const track of ms.getTracks()) pc.addTrack(track, ms);
-  const remoteStream = new MediaStream();
-  pc.ontrack = e => { e.streams[0].getAudioTracks().forEach(t => remoteStream.addTrack(t)); };
-  audioEl.srcObject = remoteStream;
+  <noscript>
+    <p>This page requires JavaScript.</p>
+  </noscript>
 
-  // 3) data channel (optional, but nice to know status)
-  const dc = pc.createDataChannel('oai-events');
-  dc.onopen = () => log('events channel open');
-  dc.onclose = () => log('events channel closed');
+  <script>
+  /* ---------- helpers ---------- */
+  const $ = s => document.querySelector(s);
+  const logBox = $('#log');
+  function log(...a){ logBox.textContent += a.join(' ') + "\\n"; logBox.scrollTop = logBox.scrollHeight; }
+  function setStatus(s){ const el = $('#status'); if (el) el.textContent = s; }
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  $('#clear').onclick = () => logBox.textContent = '';
 
-  // 4) create and send offer to OpenAI
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
+  window.addEventListener('error', e => { setStatus('error'); log('window error:', e.message); });
 
-  const resp = await fetch(
-    `https://api.openai.com/v1/realtime?model=${encodeURIComponent(MODEL)}`,
-    {
+  /* ---------- params ---------- */
+  const url = new URL(location.href);
+  const AUTO  = url.searchParams.get('auto') === '1';
+  const DELAY = Number(url.searchParams.get('delay') || 1200);
+  const MODEL = 'gpt-4o-realtime-preview-2024-12-17'; // adjust if needed
+
+  /* ---------- audio ---------- */
+  const audioEl = $('#audio');
+
+  /* ---------- main connect flow with a 401 retry ---------- */
+  async function startVoiceAgentOnce() {
+    setStatus('connecting…'); log('fetching short-lived client_secret…');
+
+    // 1) get a client_secret from our server
+    const sessRes = await fetch('/session', { method: 'POST' });
+    if (!sessRes.ok) {
+      const t = await sessRes.text().catch(()=> '');
+      throw new Error('session error ' + sessRes.status + ' ' + t);
+    }
+    const sess = await sessRes.json();
+    const token = sess?.client_secret?.value;
+    if (!token) throw new Error('no client_secret in /session response');
+
+    // 2) WebRTC setup
+    const pc = new RTCPeerConnection();
+    const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+    for (const track of mic.getTracks()) pc.addTrack(track, mic);
+
+    const remote = new MediaStream();
+    pc.ontrack = e => { e.streams[0].getAudioTracks().forEach(t => remote.addTrack(t)); };
+    audioEl.srcObject = remote;
+
+    const dc = pc.createDataChannel('oai-events');
+    dc.onopen = () => log('events channel open');
+    dc.onclose = () => log('events channel closed');
+
+    // 3) Offer → OpenAI
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const resp = await fetch('https://api.openai.com/v1/realtime?model=' + encodeURIComponent(MODEL), {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${sess.client_secret.value}`,
-        'Content-Type': 'application/sdp'
-      },
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/sdp' },
       body: offer.sdp
+    });
+
+    if (resp.status === 401) {
+      const e = new Error('401 from realtime offer'); e.code = 401; throw e;
     }
-  );
+    if (!resp.ok) {
+      const t = await resp.text().catch(()=> '');
+      throw new Error('realtime offer failed: ' + resp.status + ' ' + t);
+    }
 
-  if (resp.status === 401) {
-    // Let caller handle as a retry case
-    throw Object.assign(new Error('401 from realtime offer'), { code: 401 });
+    const answerSdp = await resp.text();
+    await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+
+    setStatus('connected'); log('connected ✔️');
   }
-  if (!resp.ok) {
-    const errTxt = await resp.text().catch(()=> '');
-    throw new Error(`realtime offer failed: ${resp.status} ${errTxt}`);
-  }
 
-  const answerSdp = await resp.text();
-  await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
-
-  setStatus('connected');
-  log('connected ✔️');
-}
-
-/* A wrapper that retries once on 401 / token timing issues */
-async function startVoiceAgentWithRetry() {
-  try {
-    await startVoiceAgentOnce();
-  } catch (err) {
-    const msg = (err && (err.message || err.toString())) || 'unknown';
-    log('error:', msg);
-    // retry once when the error is clearly auth timing: 401
-    if (err && (err.code === 401 || /401/.test(msg))) {
-      setStatus('retrying…');
-      await sleep(1500);
-      try {
-        await startVoiceAgentOnce();
-        return;
-      } catch (err2) {
-        log('retry failed:', err2.message || err2);
+  async function startVoiceAgentWithRetry() {
+    try {
+      await startVoiceAgentOnce();
+    } catch (err) {
+      log('error:', err.message || err);
+      if (err.code === 401 || /401/.test(err.message || '')) {
+        setStatus('retrying…'); await sleep(1500);
+        try { await startVoiceAgentOnce(); return; }
+        catch (e2) { log('retry failed:', e2.message || e2); setStatus('error'); }
+      } else {
         setStatus('error');
-        throw err2;
       }
-    } else {
-      setStatus('error');
-      throw err;
     }
   }
-}
 
-/* ---------- wire up buttons ---------- */
-const startBtn = $('#start');
-const stopBtn  = $('#stop');
-if (startBtn) startBtn.onclick = () => startVoiceAgentWithRetry();
-if (stopBtn)  stopBtn.onclick  = () => location.reload();
+  /* ---------- UI buttons ---------- */
+  $('#start').onclick = () => startVoiceAgentWithRetry();
+  $('#stop').onclick  = () => location.reload();
+  $('#ping').onclick  = () => alert('This demo uses passive replies; speak after the chime.');
+  $('#beep').onclick  = () => { try { new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABYBAGZmZmY=').play(); } catch {} };
 
-/* ---------- auto start ---------- */
-(async () => {
-  // Request mic proactively so iOS autoplay is satisfied
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    stream.getTracks().forEach(t => t.stop());
-  } catch (e) {
-    // If the user has never granted mic before, iOS will prompt on the real start.
-  }
-
-  if (AUTO) {
-    setStatus('warming up…');
-    await sleep(DELAY);        // give the server a moment to wake and mint the token
-    await startVoiceAgentWithRetry();
-  } else {
-    setStatus('idle');
-  }
-})();
-</script>
+  /* ---------- auto start on load ---------- */
+  (async () => {
+    // prime mic permission for iOS
+    try { const s = await navigator.mediaDevices.getUserMedia({ audio: true }); s.getTracks().forEach(t=>t.stop()); } catch {}
+    if (AUTO) {
+      setStatus('warming up…');
+      await sleep(DELAY);
+      await startVoiceAgentWithRetry();
+    } else {
+      setStatus('idle');
+    }
+  })();
+  </script>
+</body>
+</html>

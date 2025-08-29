@@ -1,238 +1,146 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1, viewport-fit=cover"
-  />
-  <title>Realtime Voice Agent</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; margin: 24px; }
-    h1 { font-size: 32px; margin: 0 0 16px; }
-    .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
-    button, select {
-      font-size: 16px; padding: 10px 14px; border-radius: 10px; border: 1px solid #8884;
-      background: #f6f6f6; cursor: pointer;
+<script>
+/* ---------- utilities ---------- */
+const $ = sel => document.querySelector(sel);
+const logBox = $('#log') || (function(){
+  const pre = document.createElement('pre');
+  pre.id = 'log';
+  pre.style.minHeight = '220px';
+  pre.style.padding = '12px';
+  pre.style.border = '1px solid #ddd';
+  pre.style.borderRadius = '8px';
+  pre.style.background = '#f7f7f7';
+  pre.style.whiteSpace = 'pre-wrap';
+  pre.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+  document.body.appendChild(pre);
+  return pre;
+})();
+function log(...args){ logBox.textContent += args.join(' ') + '\n'; }
+function setStatus(s){ const el = $('#status'); if (el) el.textContent = s; }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* ---------- params ---------- */
+const url = new URL(location.href);
+const AUTO = url.searchParams.get('auto') === '1';
+const DELAY = Number(url.searchParams.get('delay') || 1200); // ms
+const MODEL = 'gpt-4o-realtime-preview-2024-12-17'; // or your chosen realtime model
+
+/* ---------- audio widgets ---------- */
+const audioEl = $('#audio') || (function(){
+  const a = document.createElement('audio');
+  a.id = 'audio';
+  a.autoplay = true;
+  a.playsInline = true;
+  document.body.appendChild(a);
+  return a;
+})();
+
+/* ---------- main connect with retry ---------- */
+async function startVoiceAgentOnce() {
+  setStatus('connecting…');
+  log('fetching client session…');
+
+  // 1) get short-lived client_secret from our server
+  const sessRes = await fetch('/session', { method: 'POST' }).catch(e => { throw new Error('session fetch failed: '+e.message); });
+  if (!sessRes.ok) {
+    const t = await sessRes.text().catch(()=> '');
+    throw new Error(`session endpoint error ${sessRes.status} ${t}`);
+  }
+  const sess = await sessRes.json();
+  if (!sess?.client_secret?.value) throw new Error('no client_secret in /session response');
+
+  // 2) set up WebRTC
+  const pc = new RTCPeerConnection();
+  const ms = await navigator.mediaDevices.getUserMedia({ audio: true });
+  for (const track of ms.getTracks()) pc.addTrack(track, ms);
+  const remoteStream = new MediaStream();
+  pc.ontrack = e => { e.streams[0].getAudioTracks().forEach(t => remoteStream.addTrack(t)); };
+  audioEl.srcObject = remoteStream;
+
+  // 3) data channel (optional, but nice to know status)
+  const dc = pc.createDataChannel('oai-events');
+  dc.onopen = () => log('events channel open');
+  dc.onclose = () => log('events channel closed');
+
+  // 4) create and send offer to OpenAI
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  const resp = await fetch(
+    `https://api.openai.com/v1/realtime?model=${encodeURIComponent(MODEL)}`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${sess.client_secret.value}`,
+        'Content-Type': 'application/sdp'
+      },
+      body: offer.sdp
     }
-    button:disabled { opacity: .5; cursor: not-allowed; }
-    .pill { padding: 2px 8px; border-radius: 999px; background: #8881; font-size: 13px; }
-    #log {
-      min-height: 140px; border: 1px solid #8884; border-radius: 10px; padding: 12px;
-      background: #f8f8f8; white-space: pre-wrap; overflow: auto;
-    }
-    #status { font-weight: 700; }
-    .muted { opacity: .7; font-weight: 400; }
-  </style>
-</head>
-<body>
-  <h1>Realtime Voice Agent</h1>
+  );
 
-  <div class="row">
-    <button id="start">Start voice agent</button>
-    <button id="stop"  disabled>Stop</button>
-    <button id="force" disabled>Force reply</button>
-    <button id="beep">Test sound</button>
-  </div>
+  if (resp.status === 401) {
+    // Let caller handle as a retry case
+    throw Object.assign(new Error('401 from realtime offer'), { code: 401 });
+  }
+  if (!resp.ok) {
+    const errTxt = await resp.text().catch(()=> '');
+    throw new Error(`realtime offer failed: ${resp.status} ${errTxt}`);
+  }
 
-  <div class="row" style="align-items:center;">
-    <div class="muted">Output:</div>
-    <span class="pill" title="Toggles text output visibility" id="toggleOutput">⟳</span>
-  </div>
+  const answerSdp = await resp.text();
+  await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
 
-  <div class="row">
-    <div><span class="muted">Status:</span> <span id="status">idle</span></div>
-  </div>
+  setStatus('connected');
+  log('connected ✔️');
+}
 
-  <div id="log"></div>
-
-  <!-- Audio sink for the remote stream -->
-  <audio id="agent-audio" autoplay playsinline></audio>
-
-  <script>
-    // ---------- Small helpers ----------
-    const $ = s => document.querySelector(s);
-    const log = (...args) => {
-      const el = $("#log");
-      el.textContent += args.join(" ") + "\n";
-      el.scrollTop = el.scrollHeight;
-    };
-    const setStatus = (t) => $("#status").textContent = t;
-
-    // ---------- UI wiring ----------
-    const btnStart = $("#start");
-    const btnStop  = $("#stop");
-    const btnForce = $("#force");
-    const btnBeep  = $("#beep");
-    const audioEl  = $("#agent-audio");
-
-    let pc, dc, micStream, connected = false;
-
-    btnStart.addEventListener("click", startAgent);
-    btnStop.addEventListener("click", stopAgent);
-    btnForce.addEventListener("click", () => {
-      if (!dc || dc.readyState !== "open") return;
-      dc.send(JSON.stringify({ type: "response.create" }));
-      log("forced reply → response.create");
-    });
-    btnBeep.addEventListener("click", localBeep);
-
-    function updateButtons() {
-      btnStart.disabled = connected;
-      btnStop.disabled  = !connected;
-      btnForce.disabled = !connected;
-    }
-
-    // ---------- Local test beep (WebAudio) ----------
-    async function localBeep() {
+/* A wrapper that retries once on 401 / token timing issues */
+async function startVoiceAgentWithRetry() {
+  try {
+    await startVoiceAgentOnce();
+  } catch (err) {
+    const msg = (err && (err.message || err.toString())) || 'unknown';
+    log('error:', msg);
+    // retry once when the error is clearly auth timing: 401
+    if (err && (err.code === 401 || /401/.test(msg))) {
+      setStatus('retrying…');
+      await sleep(1500);
       try {
-        const ac = new (window.AudioContext || window.webkitAudioContext)();
-        const o = ac.createOscillator();
-        const g = ac.createGain();
-        o.type = "sine"; o.frequency.value = 880;
-        g.gain.value = 0.05;
-        o.connect(g).connect(ac.destination);
-        o.start();
-        setTimeout(() => { o.stop(); ac.close(); }, 180);
-        log("beep played");
-      } catch (_) {}
-    }
-
-    // ---------- Start/Stop ----------
-    async function startAgent() {
-      if (connected) return;
-
-      setStatus("preparing…");
-      updateButtons();
-
-      try {
-        // 1) Get short-lived client_secret from our server
-        const tokenRes = await fetch("/session");
-        if (!tokenRes.ok) throw new Error("failed to fetch /session");
-        const { client_secret, model } = await tokenRes.json();
-
-        // 2) Set up WebRTC
-        pc = new RTCPeerConnection();
-
-        // Remote audio to element
-        pc.ontrack = (evt) => {
-          audioEl.srcObject = evt.streams[0];
-        };
-
-        // Data channel to send control events
-        dc = pc.createDataChannel("oai-events");
-        dc.onopen  = () => log("datachannel open");
-        dc.onclose = () => log("datachannel closed");
-        dc.onmessage = (ev) => {
-          try {
-            const msg = JSON.parse(ev.data);
-            if (msg.type) log("event:", msg.type);
-          } catch {
-            log("event:", ev.data);
-          }
-        };
-
-        // 3) Capture microphone and add tracks (send & receive audio)
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
-        pc.addTransceiver("audio", { direction: "recvonly" });
-
-        // 4) Create offer and send to OpenAI Realtime endpoint
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-
-        const sdpResponse = await fetch(
-          "https://api.openai.com/v1/realtime?model=" + encodeURIComponent(model || "gpt-4o-realtime-preview-2024-12-17"),
-          {
-            method: "POST",
-            headers: {
-              "Authorization": "Bearer " + client_secret,
-              "Content-Type": "application/sdp"
-            },
-            body: offer.sdp
-          }
-        );
-
-        if (!sdpResponse.ok) {
-          throw new Error("realtime offer failed: " + sdpResponse.status);
-        }
-
-        const answerSdp = await sdpResponse.text();
-        await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-
-        connected = true;
-        setStatus("listening");
-        updateButtons();
-        log("connected to realtime model");
-      } catch (err) {
-        log("error:", err.message || err);
-        setStatus("error");
-        connected = false;
-        updateButtons();
-        cleanup();
+        await startVoiceAgentOnce();
+        return;
+      } catch (err2) {
+        log('retry failed:', err2.message || err2);
+        setStatus('error');
+        throw err2;
       }
+    } else {
+      setStatus('error');
+      throw err;
     }
+  }
+}
 
-    async function stopAgent() {
-      cleanup();
-      connected = false;
-      updateButtons();
-      setStatus("idle");
-      log("stopped");
-    }
+/* ---------- wire up buttons ---------- */
+const startBtn = $('#start');
+const stopBtn  = $('#stop');
+if (startBtn) startBtn.onclick = () => startVoiceAgentWithRetry();
+if (stopBtn)  stopBtn.onclick  = () => location.reload();
 
-    function cleanup() {
-      if (dc) { try { dc.close(); } catch {} dc = null; }
-      if (pc) { try { pc.close(); } catch {} pc = null; }
-      if (micStream) {
-        try { micStream.getTracks().forEach(t => t.stop()); } catch {}
-        micStream = null;
-      }
-    }
+/* ---------- auto start ---------- */
+(async () => {
+  // Request mic proactively so iOS autoplay is satisfied
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(t => t.stop());
+  } catch (e) {
+    // If the user has never granted mic before, iOS will prompt on the real start.
+  }
 
-    // ---------- AUTOSTART (hands-free via ?auto=1) ----------
-    (function autostart() {
-      const params = new URLSearchParams(location.search);
-      const shouldAuto = (params.get("auto") === "1" || params.get("autostart") === "1");
-      if (!shouldAuto) return;
-
-      // Prime mic permission (first run will show the system prompt)
-      try {
-        navigator.mediaDevices.getUserMedia({ audio: true })
-          .then(s => s.getTracks().forEach(t => t.stop()))
-          .catch(()=>{});
-      } catch (_) {}
-
-      // Nudge audio element for autoplay policies
-      if (audioEl) {
-        try {
-          audioEl.muted = true;
-          audioEl.playsInline = true;
-          audioEl.play && audioEl.play().catch(()=>{});
-          setTimeout(() => { audioEl.muted = false; }, 1200);
-        } catch (_) {}
-      }
-
-      // Try pressing the Start button repeatedly (covers timing & prompts)
-      function clickStart() {
-        const byId   = document.querySelector("#start");
-        const byText = [...document.querySelectorAll("button")]
-          .find(b => /start\s*voice\s*agent/i.test(b.textContent));
-        const btn = byId || byText;
-        if (btn && !btn.disabled) { btn.click(); return true; }
-        return false;
-      }
-
-      let tries = 0;
-      const iv = setInterval(() => {
-        tries++;
-        if (clickStart() || tries > 18) clearInterval(iv);
-      }, 600);
-
-      document.addEventListener("visibilitychange", () => { if (!document.hidden) clickStart(); });
-      window.addEventListener("focus", clickStart);
-    })();
-  </script>
-</body>
-</html>
+  if (AUTO) {
+    setStatus('warming up…');
+    await sleep(DELAY);        // give the server a moment to wake and mint the token
+    await startVoiceAgentWithRetry();
+  } else {
+    setStatus('idle');
+  }
+})();
+</script>

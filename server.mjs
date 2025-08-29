@@ -1,57 +1,69 @@
-// server.mjs — minimal token server + static hosting
+// server.mjs — complete working server for the Realtime demo
 
 import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+// Resolve __dirname for ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
 const app = express();
 
-// Simple CORS so the demo UI works from anywhere
+// Basic CORS so the page works anywhere
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
-// Serve static files from the repo root (so /client.html works)
+app.use(express.json());
+
+// Serve static files from this repo root (so /client.html works)
 app.use(express.static(__dirname));
 
-/**
- * GET /session  -> returns a short-lived client_secret from OpenAI
- * The browser uses this secret to talk to Realtime.
- */
-app.get('/session', async (_req, res) => {
+// Redirect root to the demo page for convenience
+app.get('/', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'client.html'));
+});
+
+// ---- Realtime session endpoint ----
+// Accept BOTH GET and POST so the client can't 404.
+app.all('/session', async (_req, res) => {
   try {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: 'Missing OPENAI_API_KEY on the server' });
+    }
+
+    const model = process.env.REALTIME_MODEL || 'gpt-4o-realtime-preview-2024-12-17';
+
     const r = await fetch('https://api.openai.com/v1/realtime/sessions', {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        model: 'gpt-4o-realtime-preview',
-        voice: 'alloy',
-        modalities: ['audio', 'text'],
-        input_audio_format: 'pcm16',
-        output_audio_format: 'pcm16',
-        input_audio_transcription: { model: 'gpt-4o-transcribe' }
+        model,
+        // you can tweak these defaults if you like
+        voice: 'verse'
       })
     });
 
-    const json = await r.json();
+    const data = await r.json();
     if (!r.ok) {
-      console.error('Session error:', json);
-      return res.status(r.status).json(json);
+      return res.status(r.status).json(data);
     }
-    res.json(json);
+    return res.json(data);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: String(err) });
+    console.error('SESSION ERROR:', err);
+    res.status(500).json({ error: err?.message || 'server error' });
   }
 });
 
-const port = process.env.PORT || 8080;
-app.listen(port, () => console.log(`Server up on :${port}`));
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`Server up on :${PORT}`));

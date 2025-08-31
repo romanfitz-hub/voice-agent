@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>Voice Agent – Diagnostic</title>
+<title>Voice Agent – Audio Unlock</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin:24px; line-height:1.45; }
@@ -11,17 +11,18 @@
   .row { display:flex; gap:10px; flex-wrap:wrap; margin:10px 0; }
   button { font-size:16px; padding:10px 14px; border-radius:10px; border:1px solid #bbb; }
   #status { font-weight:700; }
-  #log { min-height:200px; border:1px solid #ddd; border-radius:10px; padding:12px; background:#f7f7f7;
+  #log { min-height:220px; border:1px solid #ddd; border-radius:10px; padding:12px; background:#f7f7f7;
          white-space:pre-wrap; overflow:auto; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
   .note { opacity:.8; }
 </style>
 </head>
 <body>
-<h1>Voice Agent – Diagnostic</h1>
+<h1>Voice Agent – Audio Unlock</h1>
 
 <div class="row">
   <button id="beep-webaudio">Beep (WebAudio)</button>
   <button id="beep-audio">Beep (AudioTag)</button>
+  <button id="nudge">Nudge audio</button>
 </div>
 
 <div class="row">
@@ -32,7 +33,6 @@
 
 <div class="note">Status: <span id="status">idle</span></div>
 <audio id="agent-audio" autoplay playsinline></audio>
-
 <pre id="log"></pre>
 
 <script>
@@ -44,41 +44,70 @@ function setStatus(s){ $('#status').textContent = s; }
 const audioEl = $('#agent-audio');
 let pc=null, dc=null, micStream=null, connected=false, starting=false;
 
-/* -------- Beep tests -------- */
-$('#beep-webaudio').onclick = async () => {
-  log('WebAudio beep: starting');
+/* ---------- Audio unlock helpers ---------- */
+async function unlockWithWebAudio(ms = 250) {
   try {
     const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return false;
     const ctx = new AC();
-    if (ctx.state === 'suspended') { try { await ctx.resume(); } catch(e){ log('resume err', e); } }
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    gain.gain.value = 0.06;
-    osc.type = 'sine'; osc.frequency.value = 880;
+    if (ctx.state === 'suspended') { try { await ctx.resume(); } catch(e){} }
+    const osc = ctx.createOscillator(), gain = ctx.createGain();
+    gain.gain.value = 0.04; osc.frequency.value = 880;
     osc.connect(gain).connect(ctx.destination);
     osc.start();
-    setTimeout(()=>{ try{osc.stop();ctx.close()}catch{}; log('WebAudio beep: done'); }, 500);
+    await new Promise(r => setTimeout(r, ms));
+    try { osc.stop(); } catch {}
+    try { await ctx.close(); } catch {}
+    log('WebAudio nudge OK');
+    return true;
   } catch (e) {
-    log('WebAudio beep error:', e && (e.message || e.toString()));
-    alert('WebAudio beep failed: ' + (e && (e.message || e)));
+    log('WebAudio nudge failed:', e?.message || e);
+    return false;
   }
+}
+
+async function forcePlay(el) {
+  try {
+    el.muted = false;
+    el.playsInline = true;
+    const p = el.play();
+    if (p && typeof p.then === 'function') await p;
+    log('audioEl.play() resolved');
+    return true;
+  } catch (e) {
+    log('audioEl.play() error:', e?.message || e);
+    return false;
+  }
+}
+
+/* ---------- Beep tests ---------- */
+$('#beep-webaudio').onclick = async () => {
+  log('WebAudio beep');
+  await unlockWithWebAudio(400);
 };
 
 $('#beep-audio').onclick = async () => {
-  log('AudioTag beep: starting');
+  log('AudioTag beep: trying');
   try {
     const a = new Audio();
-    // 0.5s PCM WAV (audible)
-    a.src = "data:audio/wav;base64,UklGRqgAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABYAZGF0YQAAAAAAAP8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP8AAP8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA";
-    a.preload = "auto";
-    a.play().then(()=>log('AudioTag beep: playing')).catch(err=>{ log('AudioTag play() err:', err); alert('AudioTag play() failed: '+err); });
+    a.setAttribute('playsinline','');
+    // Slightly longer WAV with proper header
+    a.src = "data:audio/wav;base64,UklGRkgAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABYAaGFkYQAAAAAAAP8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP8AAP8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA";
+    await a.play();
+    log('AudioTag beep: playing');
   } catch (e) {
-    log('AudioTag beep error:', e && (e.message || e.toString()));
-    alert('AudioTag beep failed: ' + (e && (e.message || e)));
+    log('AudioTag play() error:', e?.message || e);
+    alert('AudioTag play() failed: ' + (e?.message || e));
   }
 };
 
-/* -------- Agent controls -------- */
+$('#nudge').onclick = async () => {
+  log('Manual nudge…');
+  await unlockWithWebAudio(350);
+  await forcePlay(audioEl);
+};
+
+/* ---------- Agent controls ---------- */
 function updateButtons(){
   $('#start').disabled = connected || starting;
   $('#stop').disabled  = !connected && !starting;
@@ -91,14 +120,9 @@ async function startAgent(){
   try {
     setStatus('preparing…');
 
-    // prime mic + autoplay
-    try {
-      audioEl.muted = true; audioEl.playsInline = true;
-      await audioEl.play().catch(()=>{});
-      const s = await navigator.mediaDevices.getUserMedia({ audio:true });
-      s.getTracks().forEach(t=>t.stop());
-      setTimeout(()=>{ audioEl.muted = false; }, 800);
-    } catch (e) { log('prime error:', e); }
+    // Pre-unlock audio path before any remote track arrives
+    await unlockWithWebAudio(250);
+    await forcePlay(audioEl);
 
     // fetch short-lived client_secret
     const r = await fetch('/session', { method:'POST' });
@@ -113,14 +137,18 @@ async function startAgent(){
     pc = pcLocal;
 
     const remoteStream = new MediaStream();
-    pc.ontrack = ev => {
+    pc.ontrack = async (ev) => {
       ev.streams[0].getAudioTracks().forEach(t => remoteStream.addTrack(t));
       audioEl.srcObject = remoteStream;
       log('remote track attached');
+
+      // Nudge again right after attaching remote stream
+      await unlockWithWebAudio(200);
+      await forcePlay(audioEl);
     };
 
     dc = pc.createDataChannel('oai-events');
-    dc.onopen = () => log('datachannel open');
+    dc.onopen = () => { log('datachannel open'); updateButtons(); };
     dc.onclose = () => log('datachannel closed');
     dc.onmessage = ev => { try{const m=JSON.parse(ev.data); if(m?.type) log('event:', m.type); } catch { log('event:', ev.data); } };
 
@@ -143,9 +171,9 @@ async function startAgent(){
     await pc.setRemoteDescription({ type:'answer', sdp:answer });
 
     connected = true; setStatus('listening'); updateButtons();
-    log('connected ✔️');
+    log('connected ✔️ (waiting for your voice; use Force reply to make it speak)');
   } catch (e) {
-    log('start error:', e && (e.message || e.toString()));
+    log('start error:', e?.message || e);
     setStatus('error');
   } finally {
     starting = false; updateButtons();

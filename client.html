@@ -1,117 +1,128 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>Realtime Voice Agent</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin:24px; line-height:1.45; }
-    h1 { margin:0 0 12px; font-size:28px; }
-    button { font-size:16px; padding:10px 14px; border-radius:10px; border:1px solid #bbb; margin:6px 10px 12px 0; }
-    #log { min-height:200px; border:1px solid #ddd; border-radius:10px; padding:12px; background:#f7f7f7;
-           white-space:pre-wrap; overflow:auto; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
-    #status { font-weight:700; }
-    .muted { opacity:.7 }
-  </style>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<title>Voice Agent – Diagnostic</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin:24px; line-height:1.45; }
+  h1 { margin:0 0 12px; font-size:26px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; margin:10px 0; }
+  button { font-size:16px; padding:10px 14px; border-radius:10px; border:1px solid #bbb; }
+  #status { font-weight:700; }
+  #log { min-height:200px; border:1px solid #ddd; border-radius:10px; padding:12px; background:#f7f7f7;
+         white-space:pre-wrap; overflow:auto; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .note { opacity:.8; }
+</style>
 </head>
 <body>
-  <h1>Realtime Voice Agent</h1>
+<h1>Voice Agent – Diagnostic</h1>
 
-  <div>
-    <button id="start">Start voice agent</button>
-    <button id="stop" disabled>Stop</button>
-    <button id="reply" disabled title="Force one reply">Force reply</button>
-    <button id="beep">Test sound</button>
-  </div>
+<div class="row">
+  <button id="beep-webaudio">Beep (WebAudio)</button>
+  <button id="beep-audio">Beep (AudioTag)</button>
+</div>
 
-  <div class="muted">Status: <span id="status">idle</span></div>
-  <audio id="agent-audio" autoplay playsinline></audio>
-  <pre id="log"></pre>
+<div class="row">
+  <button id="start">Start voice agent</button>
+  <button id="stop" disabled>Stop</button>
+  <button id="force" disabled>Force reply</button>
+</div>
 
-  <script>
-  // ---------- helpers ----------
-  const $ = s => document.querySelector(s);
-  const logEl = $('#log');
-  function log(...a){ logEl.textContent += a.join(' ') + '\n'; logEl.scrollTop = logEl.scrollHeight; }
-  function setStatus(s){ $('#status').textContent = s; }
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
+<div class="note">Status: <span id="status">idle</span></div>
+<audio id="agent-audio" autoplay playsinline></audio>
 
-  // ---------- state ----------
-  let pc = null, dc = null, micStream = null, remoteStream = null;
-  let starting = false, connected = false;
-  const audioEl = $('#agent-audio');
+<pre id="log"></pre>
 
-  // ---------- UI wiring ----------
-  $('#start').onclick = () => safeStart();
-  $('#stop').onclick  = () => stopAll();
-  $('#reply').onclick = () => { try { dc?.send(JSON.stringify({ type:'response.create' })); } catch {} };
-  $('#beep').onclick  = () => { try { new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABYBAGZmZmY=').play(); } catch {} };
+<script>
+const $ = s => document.querySelector(s);
+const logEl = $('#log');
+function log(...a){ logEl.textContent += a.join(' ') + '\n'; logEl.scrollTop = logEl.scrollHeight; }
+function setStatus(s){ $('#status').textContent = s; }
 
-  function updateButtons(){
-    $('#start').disabled = connected || starting;
-    $('#stop').disabled  = !connected && !starting;
-    $('#reply').disabled = !connected || dc?.readyState!=='open';
+const audioEl = $('#agent-audio');
+let pc=null, dc=null, micStream=null, connected=false, starting=false;
+
+/* -------- Beep tests -------- */
+$('#beep-webaudio').onclick = async () => {
+  log('WebAudio beep: starting');
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AC();
+    if (ctx.state === 'suspended') { try { await ctx.resume(); } catch(e){ log('resume err', e); } }
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    gain.gain.value = 0.06;
+    osc.type = 'sine'; osc.frequency.value = 880;
+    osc.connect(gain).connect(ctx.destination);
+    osc.start();
+    setTimeout(()=>{ try{osc.stop();ctx.close()}catch{}; log('WebAudio beep: done'); }, 500);
+  } catch (e) {
+    log('WebAudio beep error:', e && (e.message || e.toString()));
+    alert('WebAudio beep failed: ' + (e && (e.message || e)));
   }
+};
 
-  // ---------- main start with retry & single-connection guard ----------
-  async function safeStart(){
-    if (starting || connected) { log('start ignored (already starting/connected)'); return; }
-    starting = true; updateButtons();
-    try {
-      await autoStartWithRetry();
-    } finally {
-      starting = false; updateButtons();
-    }
+$('#beep-audio').onclick = async () => {
+  log('AudioTag beep: starting');
+  try {
+    const a = new Audio();
+    // 0.5s PCM WAV (audible)
+    a.src = "data:audio/wav;base64,UklGRqgAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABYAZGF0YQAAAAAAAP8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP8AAP8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA";
+    a.preload = "auto";
+    a.play().then(()=>log('AudioTag beep: playing')).catch(err=>{ log('AudioTag play() err:', err); alert('AudioTag play() failed: '+err); });
+  } catch (e) {
+    log('AudioTag beep error:', e && (e.message || e.toString()));
+    alert('AudioTag beep failed: ' + (e && (e.message || e)));
   }
+};
 
-  async function autoStartWithRetry(){
-    const url = new URL(location.href);
-    const delay = Number(url.searchParams.get('delay') || 1200);
-    // iOS autoplay: nudge audio and pre-request mic once
+/* -------- Agent controls -------- */
+function updateButtons(){
+  $('#start').disabled = connected || starting;
+  $('#stop').disabled  = !connected && !starting;
+  $('#force').disabled = !connected || dc?.readyState!=='open';
+}
+
+async function startAgent(){
+  if (starting || connected) { log('start ignored'); return; }
+  starting = true; updateButtons();
+  try {
+    setStatus('preparing…');
+
+    // prime mic + autoplay
     try {
-      audioEl.muted = true; audioEl.playsInline = true; await audioEl.play().catch(()=>{});
+      audioEl.muted = true; audioEl.playsInline = true;
+      await audioEl.play().catch(()=>{});
       const s = await navigator.mediaDevices.getUserMedia({ audio:true });
-      s.getTracks().forEach(t => t.stop());
-      setTimeout(()=>{ audioEl.muted = false; }, 1000);
-    } catch {}
-
-    setStatus('warming up…'); await sleep(delay);
-    try {
-      await startOnce();
-    } catch (e) {
-      log('start error:', e?.message || e);
-      // Retry once if auth / timing
-      if (/401/.test(String(e)) || /offer failed/i.test(String(e))) {
-        setStatus('retrying…'); await sleep(1500);
-        await startOnce(); // throw if still bad
-      } else { throw e; }
-    }
-  }
-
-  async function startOnce(){
-    setStatus('connecting…');
+      s.getTracks().forEach(t=>t.stop());
+      setTimeout(()=>{ audioEl.muted = false; }, 800);
+    } catch (e) { log('prime error:', e); }
 
     // fetch short-lived client_secret
     const r = await fetch('/session', { method:'POST' });
-    if (!r.ok) throw new Error('session error ' + r.status);
+    if (!r.ok) throw new Error('session error '+r.status);
     const sess = await r.json();
     const token = sess?.client_secret?.value;
     const model = sess?.model || 'gpt-4o-realtime-preview-2024-12-17';
     if (!token) throw new Error('no client_secret');
 
-    pc = new RTCPeerConnection();
+    // WebRTC
+    const pcLocal = new RTCPeerConnection();
+    pc = pcLocal;
 
-    remoteStream = new MediaStream();
+    const remoteStream = new MediaStream();
     pc.ontrack = ev => {
       ev.streams[0].getAudioTracks().forEach(t => remoteStream.addTrack(t));
       audioEl.srcObject = remoteStream;
+      log('remote track attached');
     };
 
     dc = pc.createDataChannel('oai-events');
-    dc.onopen  = () => log('datachannel open');
+    dc.onopen = () => log('datachannel open');
     dc.onclose = () => log('datachannel closed');
-    dc.onmessage = ev => { try{ const m=JSON.parse(ev.data); if(m?.type) log('event:', m.type); } catch{ log('event:', ev.data); } };
+    dc.onmessage = ev => { try{const m=JSON.parse(ev.data); if(m?.type) log('event:', m.type); } catch { log('event:', ev.data); } };
 
     micStream = await navigator.mediaDevices.getUserMedia({ audio:true });
     micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
@@ -126,47 +137,36 @@
       body: offer.sdp
     });
     if (resp.status === 401) throw new Error('401 realtime offer');
-    if (!resp.ok) throw new Error('realtime offer failed: '+resp.status+' '+await resp.text());
+    if (!resp.ok) throw new Error('realtime offer failed '+resp.status+' '+ await resp.text());
 
     const answer = await resp.text();
     await pc.setRemoteDescription({ type:'answer', sdp:answer });
 
     connected = true; setStatus('listening'); updateButtons();
-    log('connected ✔️  (VAD will NOT auto-reply; use Force reply or speak clearly)');
+    log('connected ✔️');
+  } catch (e) {
+    log('start error:', e && (e.message || e.toString()));
+    setStatus('error');
+  } finally {
+    starting = false; updateButtons();
   }
+}
 
-  function stopAll(){
-    log('stopping…');
-    try { dc?.close(); } catch {}
-    try { pc?.close(); } catch {}
-    try { micStream?.getTracks().forEach(t=>t.stop()); } catch {}
-    try { audioEl.srcObject = null; } catch {}
-    dc = null; pc = null; micStream = null; remoteStream = null;
-    connected = false; setStatus('idle'); updateButtons();
-  }
+function stopAgent(){
+  log('stopping…');
+  try { dc?.close(); } catch {}
+  try { pc?.close(); } catch {}
+  try { micStream?.getTracks().forEach(t=>t.stop()); } catch {}
+  try { audioEl.srcObject = null; } catch {}
+  dc=null; pc=null; micStream=null; connected=false;
+  setStatus('idle'); updateButtons();
+}
 
-  // ---------- URL controls ----------
-  (function controlsFromURL(){
-    const url = new URL(location.href);
-    if (url.searchParams.get('stop') === '1') {
-      stopAll();
-      log('stop=1 → cleaned up');
-      return;
-    }
-    const auto = url.searchParams.get('auto') === '1';
-    if (auto) safeStart();
-  })();
+$('#start').onclick = startAgent;
+$('#stop').onclick  = stopAgent;
+$('#force').onclick = () => { try { dc?.send(JSON.stringify({ type:'response.create' })); } catch{}; };
 
-  // ---------- auto-stop when tab hidden (prevents background babble) ----------
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && connected) {
-      stopAll();
-      log('tab hidden → stopped');
-    }
-  });
-
-  // ---------- initial UI ----------
-  updateButtons(); setStatus('idle');
-  </script>
+setStatus('idle'); updateButtons();
+</script>
 </body>
 </html>

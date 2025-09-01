@@ -1,165 +1,180 @@
-// server.mjs — Realtime token server + simple memory (Upstash Redis REST)
-import 'dotenv/config';
-import express from 'express';
-import path from 'path';
-import { fileURLToPath } from 'url';
+// server.mjs
+import express from "express";
+import path from "path";
+import cors from "cors";
+import bodyParser from "body-parser";
+import { fileURLToPath } from "url";
 
+// ---------- Setup ----------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(express.json());
+app.use(cors());
+app.use(bodyParser.json());
 
-// CORS (allow your page to call these endpoints)
-app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
-  next();
+// Render/Node 18+ has global fetch.
+const PORT = process.env.PORT || 3000;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+// Upstash Redis REST (for memory)
+const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL; // e.g. https://us1-shiny-12345.upstash.io
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+// A small helper to call Upstash REST
+async function redisGet(key) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
+  const res = await fetch(`${UPSTASH_URL}/get/${encodeURIComponent(key)}`, {
+    headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+  });
+  if (!res.ok) return null;
+  const data = await res.json(); // { result: "value" }
+  return data.result ?? null;
+}
+
+async function redisSet(key, value) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return false;
+  const res = await fetch(
+    `${UPSTASH_URL}/set/${encodeURIComponent(key)}/${encodeURIComponent(
+      value
+    )}`,
+    { headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` } }
+  );
+  return res.ok;
+}
+
+// Build instruction text from saved memory
+function memoryToInstructions(mem) {
+  if (!mem) return "";
+  const bits = [];
+  if (mem.name) bits.push(`User's name is ${mem.name}. Address them by name.`);
+  if (Array.isArray(mem.kids) && mem.kids.length) {
+    bits.push(`User has children: ${mem.kids.join(", ")}.`);
+  }
+  if (mem.tone)
+    bits.push(`Use this tone with the user: ${mem.tone}.`);
+  if (mem.persona)
+    bits.push(`Adopt this persona: ${mem.persona}.`);
+  if (Array.isArray(mem.notes) && mem.notes.length) {
+    bits.push(`Keep in mind: ${mem.notes.join(" | ")}.`);
+  }
+  return bits.join(" ");
+}
+
+// ---------- Memory API ----------
+// GET /memory/get?userId=abc
+app.get("/memory/get", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: "Missing userId" });
+    const raw = await redisGet(`mem:${userId}`);
+    const mem = raw ? JSON.parse(raw) : {};
+    return res.json({ ok: true, memory: mem });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
-// Static files (serve client.html etc.)
-app.use(express.static(__dirname));
-app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'client.html')));
+// POST /memory/set
+// body: { userId, name?, kids? (string or array), tone?, persona?, note? (single note to add) }
+app.post("/memory/set", async (req, res) => {
+  try {
+    const { userId } = req.body || {};
+    if (!userId) return res.status(400).json({ error: "Missing userId" });
 
-/* -------------------- Memory store (Upstash REST) -------------------- */
-const UURL = process.env.UPSTASH_REDIS_REST_URL;
-const UTOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
-const okKV = !!(UURL && UTOKEN);
+    // Load current memory
+    const raw = await redisGet(`mem:${userId}`);
+    const current = raw ? JSON.parse(raw) : {};
 
-async function kvGet(key) {
-  if (!okKV) return null;
-  const r = await fetch(`${UURL}/get/${encodeURIComponent(key)}`, {
-    headers: { Authorization: `Bearer ${UTOKEN}` },
-    cache: 'no-store'
-  });
-  const j = await r.json().catch(() => ({}));
-  // Upstash returns: { result: "string or null" }
-  if (!('result' in j) || j.result === null) return null;
-  try { return JSON.parse(j.result); } catch { return j.result; }
-}
+    // Merge updates
+    const next = { ...current };
+    if (typeof req.body.name === "string") next.name = req.body.name.trim();
 
-async function kvSet(key, val) {
-  if (!okKV) return false;
-  const value = encodeURIComponent(typeof val === 'string' ? val : JSON.stringify(val));
-  const r = await fetch(`${UURL}/set/${encodeURIComponent(key)}/${value}`, {
-    headers: { Authorization: `Bearer ${UTOKEN}` }
-  });
-  const j = await r.json().catch(() => ({}));
-  return j.result === 'OK';
-}
-
-function userKey(userId) { return `dummy:mem:${userId}`; }
-
-/* Basic schema we’ll store:
-{
-  profile: { name: "Your Name", kids: ["Ava", "Ben", "Chris"] },
-  prefs:   { tone: "witty/concise", persona: "friendly coach" },
-  notes:   ["freeform facts..."]
-}
-*/
-
-// Merge helper
-function deepMerge(base = {}, patch = {}) {
-  const out = { ...base };
-  for (const k of Object.keys(patch)) {
-    if (patch[k] && typeof patch[k] === 'object' && !Array.isArray(patch[k])) {
-      out[k] = deepMerge(base[k] || {}, patch[k]);
-    } else {
-      out[k] = patch[k];
+    if (Array.isArray(req.body.kids)) {
+      next.kids = req.body.kids.map((k) => String(k).trim()).filter(Boolean);
+    } else if (typeof req.body.kids === "string") {
+      next.kids = req.body.kids
+        .split(",")
+        .map((k) => k.trim())
+        .filter(Boolean);
     }
-  }
-  return out;
-}
 
-/* -------------------- Memory API -------------------- */
-// POST /mem/get { user_id }
-app.post('/mem/get', async (req, res) => {
-  try {
-    const { user_id } = req.body || {};
-    if (!user_id) return res.status(400).json({ error: 'user_id required' });
-    const mem = (await kvGet(userKey(user_id))) || {};
-    res.json({ ok: true, memory: mem, persisted: !!okKV });
+    if (typeof req.body.tone === "string") next.tone = req.body.tone.trim();
+    if (typeof req.body.persona === "string")
+      next.persona = req.body.persona.trim();
+
+    if (typeof req.body.note === "string" && req.body.note.trim()) {
+      next.notes = Array.isArray(next.notes) ? next.notes : [];
+      next.notes.push(req.body.note.trim());
+    }
+
+    await redisSet(`mem:${userId}`, JSON.stringify(next));
+    return res.json({ ok: true, memory: next });
   } catch (e) {
-    res.status(500).json({ error: e.message || 'mem/get error' });
+    return res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-// POST /mem/put { user_id, patch }
-app.post('/mem/put', async (req, res) => {
+// ---------- Realtime session token endpoint ----------
+// The client calls this to get a short-lived client_secret for WebRTC
+app.post("/session", async (req, res) => {
   try {
-    const { user_id, patch } = req.body || {};
-    if (!user_id) return res.status(400).json({ error: 'user_id required' });
-    if (!patch || typeof patch !== 'object') return res.status(400).json({ error: 'patch object required' });
+    const { userId } = req.body || {};
+    // Look up memory for this user and blend into instructions
+    let mem = null;
+    if (userId) {
+      const raw = await redisGet(`mem:${userId}`);
+      mem = raw ? JSON.parse(raw) : null;
+    }
 
-    const current = (await kvGet(userKey(user_id))) || {};
-    const merged = deepMerge(current, patch);
-    const ok = await kvSet(userKey(user_id), merged);
-    res.json({ ok, memory: merged });
-  } catch (e) {
-    res.status(500).json({ error: e.message || 'mem/put error' });
-  }
-});
+    const memoryText = memoryToInstructions(mem);
 
-/* -------------------- Realtime session token -------------------- */
-// Builds a short instruction from memory
-function memoryToInstruction(mem = {}) {
-  const parts = [];
-  if (mem.profile?.name) parts.push(`User name: ${mem.profile.name}.`);
-  if (mem.profile?.kids?.length) parts.push(`User has ${mem.profile.kids.length} kids: ${mem.profile.kids.join(', ')}.`);
-  if (mem.prefs?.tone) parts.push(`Use this tone: ${mem.prefs.tone}.`);
-  if (mem.prefs?.persona) parts.push(`Adopt this persona: ${mem.prefs.persona}.`);
-  if (mem.notes?.length) parts.push(`Known facts: ${mem.notes.slice(-5).join(' ; ')}.`);
-  if (!parts.length) return '';
-  return `\n\nPERSONAL MEMORY:\n${parts.join(' ')}\nUse these details to personalize responses and remember updates when the user tells you new facts.`;
-}
-
-// POST /session  (optionally body: { user_id })
-app.all('/session', async (req, res) => {
-  try {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'Missing OPENAI_API_KEY' });
-
-    const userId = req.body?.user_id || req.query?.u || null;
-    const mem = userId ? (await kvGet(userKey(userId))) || {} : {};
-    const memInstr = memoryToInstruction(mem);
-
-    const sessionConfig = {
-      model: process.env.REALTIME_MODEL || 'gpt-4o-realtime-preview-2024-12-17',
-      voice: 'verse',
-      // Base instructions + memory summary
-      instructions:
-        "You are Dummy, a concise, friendly voice assistant. Keep replies short unless asked. Speak when the user addresses you." +
-        memInstr,
-      turn_detection: {
-        type: 'server_vad',
-        threshold: 0.75,
-        prefix_padding_ms: 300,
-        silence_duration_ms: 700,
-        create_response: true,
-        interrupt_response: true
-      }
-      // tools/tool_choice omitted for simplicity; we can add later (save_memory calls)
-    };
-
-    const r = await fetch('https://api.openai.com/v1/realtime/sessions', {
-      method: 'POST',
+    const resp = await fetch("https://api.openai.com/v1/realtime/sessions", {
+      method: "POST",
       headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
       },
-      body: JSON.stringify(sessionConfig)
+      body: JSON.stringify({
+        model: "gpt-4o-realtime-preview-2024-12-17",
+        // Your base agent settings:
+        voice: "verse",
+        modalities: ["audio", "text"],
+        turn_detection: {
+          type: "server_vad",
+          threshold: 0.75,
+          prefix_padding_ms: 300,
+          silence_duration_ms: 700,
+          create_response: false,
+          interrupt_response: true,
+        },
+        // Fold memory into the system instructions:
+        instructions:
+          "You are Dummy, a concise, friendly voice assistant. Keep replies short unless asked. Speak when the user addresses you. " +
+          (memoryText ? `Personalization: ${memoryText}` : ""),
+      }),
     });
 
-    const data = await r.json();
-    if (!r.ok) return res.status(r.status).json(data);
-    res.json(data);
-  } catch (err) {
-    console.error('SESSION ERROR:', err);
-    res.status(500).json({ error: err?.message || 'server error' });
+    if (!resp.ok) {
+      const text = await resp.text();
+      return res.status(500).json({ error: `OpenAI error: ${text}` });
+    }
+
+    const data = await resp.json();
+    return res.json(data);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
   }
 });
 
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Server up on :${PORT}`));
+// ---------- Static files ----------
+app.use(express.static(__dirname)); // serve client.html and assets from repo root
+
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(__dirname, "client.html"));
+});
+
+// ---------- Start ----------
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});

@@ -1,229 +1,196 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1, viewport-fit=cover"
-  />
-  <title>Voice Agent — Audio Unlock</title>
-  <style>
-    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; padding: 24px; line-height: 1.35; }
-    h1 { font-size: 34px; margin: 0 0 18px; }
-    button { font-size: 20px; padding: 14px 18px; margin: 8px 10px 8px 0; border-radius: 12px; border: 1px solid #c8c8c8; background: #f6f6f7; }
-    button:disabled { opacity: 0.5; }
-    #status { font-weight: 700; }
-    #log { width: 100%; height: 360px; border: 1px solid #ddd; border-radius: 12px; padding: 16px; overflow: auto; white-space: pre-wrap; background: #fafafa; }
-    .row { margin: 10px 0; }
-  </style>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<title>Voice Agent — Guarded</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin:24px; line-height:1.44; }
+  h1 { margin:0 0 12px; font-size:26px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; margin:10px 0; }
+  button { font-size:16px; padding:10px 14px; border-radius:10px; border:1px solid #bbb; }
+  button:disabled{ opacity:.6 }
+  #status { font-weight:700; }
+  #log { min-height:220px; border:1px solid #ddd; border-radius:10px; padding:12px; background:#f7f7f7;
+         white-space:pre-wrap; overflow:auto; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .note { opacity:.8; }
+</style>
 </head>
 <body>
-  <h1>Voice Agent — Audio Unlock</h1>
+<h1>Voice Agent — Guarded</h1>
 
-  <div class="row">
-    <button id="beep-wa">Beep (WebAudio)</button>
-    <button id="beep-tag">Beep (AudioTag)</button>
-    <button id="nudge">Nudge audio</button>
-  </div>
+<div class="row">
+  <button id="beep-wa">Beep (WebAudio)</button>
+  <button id="beep-tag">Beep (AudioTag)</button>
+  <button id="nudge">Nudge audio</button>
+  <button id="unlock-mic">Unlock mic</button>
+</div>
 
-  <div class="row">
-    <button id="unlock-mic">Unlock mic</button>
-    <button id="start">Start voice agent</button>
-    <button id="stop">Stop</button>
-  </div>
+<div class="row">
+  <button id="start">Start voice agent</button>
+  <button id="stop" disabled>Stop</button>
+  <button id="force" disabled>Force reply</button>
+</div>
 
-  <div class="row">
-    <button id="force">Force reply</button>
-    <button id="test">Test sound</button>
-  </div>
-
-  <p>Status: <span id="status">idle</span></p>
-  <pre id="log"></pre>
-
-  <!-- Hidden audio element for the remote track -->
-  <audio id="out" autoplay playsinline></audio>
-  <!-- Tiny data URI beep for the <audio> tag path -->
-  <audio id="beep" preload="auto"
-    src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAAAAP//AP//AP//AP//AP//AP//AP//AP//"></audio>
+<div class="note">Status: <span id="status">idle</span></div>
+<audio id="out" autoplay playsinline></audio>
+<pre id="log"></pre>
 
 <script>
-  // ===== helpers =====
-  const $ = sel => document.querySelector(sel);
-  const logBox = $('#log');
-  function log(msg) {
-    const s = typeof msg === 'string' ? msg : JSON.stringify(msg);
-    logBox.textContent += s + '\n';
-    logBox.scrollTop = logBox.scrollHeight;
+/* ===== helpers ===== */
+const $ = s => document.querySelector(s);
+const logEl = $('#log');
+function log(...a){ logEl.textContent += a.join(' ') + '\n'; logEl.scrollTop = logEl.scrollHeight; }
+function setStatus(s){ $('#status').textContent = s; }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* ===== global state & guard ===== */
+let pc=null, dc=null, localStream=null;
+let AGENT_STARTING = false;
+let AGENT_STARTED  = false;
+
+/* ===== audio unlock ===== */
+let audioCtx;
+async function beepWebAudio(ms=150, freq=880){
+  try{
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(!audioCtx) audioCtx = new AC();
+    if(audioCtx.state==='suspended') await audioCtx.resume();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type='sine'; o.frequency.value=freq; g.gain.value=0.08;
+    o.connect(g).connect(audioCtx.destination); o.start();
+    await sleep(ms); o.stop();
+    log('WebAudio beep');
+  }catch(e){ log('webaudio error:', e?.message||e); }
+}
+async function nudgeAudio(){
+  await beepWebAudio(60, 1200);
+  log('WebAudio nudge OK');
+}
+function beepAudioTag(){
+  try{
+    const a = new Audio();
+    a.setAttribute('playsinline','');
+    a.src = "data:audio/wav;base64,UklGRkgAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABYAaGFkYQAAAAAAAP8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP8AAP8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA";
+    a.play().then(()=>log('AudioTag beep')).catch(err=>log('AudioTag play error:', err));
+  }catch(e){ log('AudioTag exception:', e?.message||e); }
+}
+async function unlockMicOnce(){
+  log('requesting microphone…');
+  try{
+    const s = await navigator.mediaDevices.getUserMedia({ audio:true });
+    s.getTracks().forEach(t=>t.stop());
+    log('microphone OK');
+    return true;
+  }catch(err){
+    log('mic error:', err?.message||err);
+    return false;
   }
-  function setStatus(s) { $('#status').textContent = s; }
+}
 
-  // ===== audio unlock tools =====
-  let audioCtx;
-  async function beepWebAudio(ms = 120, freq = 880) {
-    try {
-      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      if (audioCtx.state === 'suspended') await audioCtx.resume();
-      const o = audioCtx.createOscillator();
-      const g = audioCtx.createGain();
-      o.type = 'sine';
-      o.frequency.value = freq;
-      o.connect(g); g.connect(audioCtx.destination);
-      g.gain.setValueAtTime(0.1, audioCtx.currentTime);
-      o.start();
-      await new Promise(r => setTimeout(r, ms));
-      o.stop();
-      log('WebAudio beep');
-    } catch (e) {
-      log('webaudio error: ' + e.message);
-    }
+/* ===== UI state ===== */
+function updateButtons(){
+  $('#start').disabled = AGENT_STARTING || AGENT_STARTED;
+  $('#stop').disabled  = !(AGENT_STARTING || AGENT_STARTED);
+  $('#force').disabled = !dc || dc.readyState!=='open';
+}
+
+/* ===== start/stop guarded ===== */
+async function startAgentOnce(){
+  if (AGENT_STARTING || AGENT_STARTED){ log('start ignored (already starting/started)'); return; }
+  AGENT_STARTING = true; updateButtons();
+  try{
+    setStatus('preparing…');
+
+    // 0) make sure output audio is unlocked & mic permission is granted
+    await nudgeAudio();
+    const micOk = await unlockMicOnce();
+    if(!micOk){ setStatus('idle'); return; }
+
+    // 1) fetch short-lived client_secret
+    log('fetching short-lived client_secret…');
+    const sessResp = await fetch('/session', { method:'POST' });
+    if(!sessResp.ok){ throw new Error('session error '+sessResp.status); }
+    const sess = await sessResp.json();
+    const clientSecret = sess?.client_secret?.value;
+    const model = sess?.model || 'gpt-4o-realtime-preview-2024-12-17';
+    if(!clientSecret) throw new Error('no client_secret');
+
+    // 2) mic stream for real call
+    localStream = await navigator.mediaDevices.getUserMedia({ audio:true });
+
+    // 3) WebRTC
+    pc = new RTCPeerConnection();
+    pc.onconnectionstatechange = () => log('pc state: '+pc.connectionState);
+    pc.oniceconnectionstatechange = () => log('ice state: '+pc.iceConnectionState);
+    pc.ontrack = (e)=>{ $('#out').srcObject = e.streams[0]; };
+
+    dc = pc.createDataChannel('oai-events');
+    dc.onopen  = () => { log('datachannel open'); updateButtons(); };
+    dc.onclose = () => log('datachannel closed');
+    dc.onmessage = (ev)=>log('event: '+ev.data);
+
+    for(const t of localStream.getTracks()) pc.addTrack(t, localStream);
+    const offer = await pc.createOffer({ offerToReceiveAudio:true });
+    await pc.setLocalDescription(offer);
+
+    const answerSDP = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`,{
+      method:'POST',
+      headers:{ 'Authorization':'Bearer '+clientSecret, 'Content-Type':'application/sdp' },
+      body: offer.sdp
+    }).then(r=>r.text());
+
+    await pc.setRemoteDescription({ type:'answer', sdp:answerSDP });
+
+    AGENT_STARTED = true;
+    setStatus('listening');
+    log('connected ✓ (speak to get a reply, or press Force reply)');
+    updateButtons();
+  }catch(err){
+    setStatus('error');
+    log('start error:', err?.message||err);
+  }finally{
+    AGENT_STARTING = false; updateButtons();
   }
-  function beepAudioTag() {
-    const tag = $('#beep');
-    tag.currentTime = 0;
-    tag.play().then(() => log('AudioTag beep')).catch(err => log('AudioTag play error: ' + err));
+}
+
+function stopAgent(){
+  log('stopping…');
+  try{ dc && dc.close(); }catch{}
+  try{ pc && pc.close(); }catch{}
+  try{ localStream && localStream.getTracks().forEach(t=>t.stop()); }catch{}
+  dc=null; pc=null; localStream=null;
+  AGENT_STARTED = false; AGENT_STARTING = false;
+  setStatus('idle'); updateButtons();
+}
+
+function forceReply(){
+  if(!dc || dc.readyState!=='open'){ log('force: channel not open'); return; }
+  dc.send(JSON.stringify({ type:'response.create' }));
+  log('force reply sent');
+}
+
+/* ===== wire UI ===== */
+$('#beep-wa').onclick = () => beepWebAudio();
+$('#beep-tag').onclick = () => beepAudioTag();
+$('#nudge').onclick   = () => nudgeAudio();
+$('#unlock-mic').onclick = () => unlockMicOnce();
+$('#start').onclick   = () => startAgentOnce();
+$('#stop').onclick    = () => stopAgent();
+$('#force').onclick   = () => forceReply();
+
+setStatus('idle'); updateButtons();
+
+/* ===== auto-start handler (runs ONCE) ===== */
+window.addEventListener('load', async () => {
+  const q = new URLSearchParams(location.search);
+  if (q.get('auto') === '1') {
+    // small delay so Safari finishes painting; then guarded start
+    await sleep(400);
+    startAgentOnce();
   }
-  async function nudgeAudio() {
-    await beepWebAudio(40, 1200);
-    log('WebAudio nudge OK');
-  }
-
-  // Explicit, user-gesture microphone unlock for iOS
-  async function unlockMicOnce() {
-    log('requesting microphone…');
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      // we only wanted the permission; stop temp tracks
-      stream.getTracks().forEach(t => t.stop());
-      log('microphone OK');
-      return true;
-    } catch (err) {
-      log('mic error: ' + (err && err.message ? err.message : err));
-      return false;
-    }
-  }
-
-  // ===== WebRTC to OpenAI Realtime =====
-  let pc, dc, localStream;
-
-  async function startAgent() {
-    try {
-      setStatus('preparing…');
-
-      // 0) make sure output audio is unlocked
-      await nudgeAudio();
-
-      // 1) ENSURE mic permission (critical on iOS)
-      const ok = await unlockMicOnce();
-      if (!ok) { setStatus('idle'); return; }
-
-      // 2) fetch a short-lived client_secret from our server
-      log('fetching short-lived client_secret…');
-      const sess = await fetch('/session', { method: 'POST' }).then(r => r.json());
-      if (!sess || !sess.client_secret || !sess.client_secret.value) {
-        log('error: no client_secret from /session'); setStatus('idle'); return;
-      }
-      const clientSecret = sess.client_secret.value;
-
-      // 3) prepare local mic (real stream this time)
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-      // 4) webRTC plumbing
-      pc = new RTCPeerConnection();
-      pc.onconnectionstatechange = () => log('pc state: ' + pc.connectionState);
-      pc.oniceconnectionstatechange = () => log('ice state: ' + pc.iceConnectionState);
-
-      // remote audio
-      pc.ontrack = (e) => { $('#out').srcObject = e.streams[0]; };
-
-      // send mic
-      for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
-
-      // data channel for events
-      dc = pc.createDataChannel('oai-events');
-      dc.onopen = () => log('datachannel open');
-      dc.onmessage = (ev) => log('event: ' + ev.data);
-
-      // 5) create offer
-      const offer = await pc.createOffer({ offerToReceiveAudio: true });
-      await pc.setLocalDescription(offer);
-
-      // 6) exchange SDP directly with OpenAI Realtime using the client_secret
-      const model = 'gpt-4o-realtime-preview-2024-12-17';
-      const sdpAnswer = await fetch(
-        `https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${clientSecret}`,
-            'Content-Type': 'application/sdp'
-          },
-          body: offer.sdp
-        }
-      ).then(r => r.text());
-
-      await pc.setRemoteDescription({ type: 'answer', sdp: sdpAnswer });
-
-      setStatus('listening');
-      log('connected ✓ (VAD will NOT auto-reply; use Force reply or speak clearly)');
-    } catch (err) {
-      setStatus('error');
-      log('start error: ' + (err && err.message ? err.message : err));
-    }
-  }
-
-  function stopAgent() {
-    try {
-      if (dc && dc.readyState === 'open') dc.close();
-      if (pc) pc.close();
-      if (localStream) localStream.getTracks().forEach(t => t.stop());
-    } catch {}
-    pc = dc = localStream = null;
-    setStatus('idle');
-    log('stopped');
-  }
-
-  // Send a “please speak now” response (forces a TTS reply)
-  function forceReply() {
-    if (!dc || dc.readyState !== 'open') return log('force: channel not open');
-    dc.send(JSON.stringify({
-      type: 'response.create',
-      response: { modalities: ['audio'], instructions: 'Please respond now.' }
-    }));
-    log('force reply sent');
-  }
-
-  // Simple “test sound” (agent says something)
-  function testSound() {
-    if (!dc || dc.readyState !== 'open') return log('test: channel not open');
-    dc.send(JSON.stringify({
-      type: 'response.create',
-      response: { modalities: ['audio'], instructions: 'Beep played' }
-    }));
-    log('test sound requested');
-  }
-
-  // ===== wire up UI =====
-  $('#beep-wa').addEventListener('click', () => beepWebAudio());
-  $('#beep-tag').addEventListener('click', beepAudioTag);
-  $('#nudge').addEventListener('click', nudgeAudio);
-  $('#unlock-mic').addEventListener('click', unlockMicOnce);
-  $('#start').addEventListener('click', startAgent);
-  $('#stop').addEventListener('click', stopAgent);
-  $('#force').addEventListener('click', forceReply);
-  $('#test').addEventListener('click', testSound);
-
-  // Optional: auto-start when URL has ?auto=1 (only useful after you’ve
-  // already granted mic permission for the site at least once)
-  const params = new URLSearchParams(location.search);
-  if (params.get('auto') === '1') {
-    (async () => {
-      // small delay so autoplay has a user gesture chain from a Shortcut
-      await new Promise(r => setTimeout(r, 600));
-      await nudgeAudio();
-      await unlockMicOnce();
-      startAgent();
-    })();
-  }
+});
 </script>
 </body>
 </html>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>Voice Agent — Guarded v2</title>
+<title>Voice Agent — Guarded v3</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin:24px; line-height:1.44; }
@@ -15,10 +15,24 @@
   #log { min-height:220px; border:1px solid #ddd; border-radius:10px; padding:12px; background:#f7f7f7;
          white-space:pre-wrap; overflow:auto; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
   .note { opacity:.8; }
+
+  /* overlay for auto mode */
+  #tapOverlay {
+    position: fixed; inset: 0; display: none; place-items:center;
+    background: color-mix(in oklab, Canvas 70%, black 30%);
+    backdrop-filter: blur(4px);
+    z-index: 9999; text-align:center; padding: 24px;
+  }
+  #tapOverlay .card {
+    border: 1px solid #ccc; border-radius: 14px; padding: 18px 20px; max-width: 460px;
+    background: color-mix(in oklab, Canvas 85%, black 15%);
+  }
+  #tapOverlay h2 { margin: 0 0 8px; font-size: 20px; }
+  #tapOverlay p { margin: 0; opacity: .85; }
 </style>
 </head>
 <body>
-<h1>Voice Agent — Guarded v2</h1>
+<h1>Voice Agent — Guarded v3</h1>
 
 <div class="row">
   <button id="beep-wa">Beep (WebAudio)</button>
@@ -36,6 +50,14 @@
 <div class="note">Status: <span id="status">idle</span></div>
 <audio id="out" autoplay playsinline></audio>
 <pre id="log"></pre>
+
+<!-- one-time user gesture for iOS audio -->
+<div id="tapOverlay" role="dialog" aria-modal="true">
+  <div class="card">
+    <h2>Tap to allow audio</h2>
+    <p>iPhone needs a quick tap to enable sound. Tap anywhere to start the voice agent.</p>
+  </div>
+</div>
 
 <script>
 const $ = s => document.querySelector(s);
@@ -181,12 +203,30 @@ $('#force').onclick   = () => forceReply();
 
 setStatus('idle'); updateButtons();
 
+const tapOverlay = $('#tapOverlay');
+function showTapOverlay(){ tapOverlay.style.display = 'grid'; }
+function hideTapOverlay(){ tapOverlay.style.display = 'none'; }
+
 window.addEventListener('load', async () => {
   const q = new URLSearchParams(location.search);
   if (q.get('auto') === '1') {
-    // give Safari an extra moment
-    await sleep(600);
-    startAgentOnce();
+    // If audio context will be suspended, request a quick tap first.
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const probe = new AC();
+    if (probe.state === 'suspended') {
+      showTapOverlay();
+      const onTap = async () => {
+        hideTapOverlay();
+        document.removeEventListener('pointerdown', onTap, true);
+        try { await probe.resume(); } catch {}
+        await sleep(150);
+        startAgentOnce();
+      };
+      document.addEventListener('pointerdown', onTap, true);
+    } else {
+      await sleep(400); // tiny paint delay
+      startAgentOnce();
+    }
   }
 });
 </script>

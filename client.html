@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>Voice Agent — Guarded</title>
+<title>Voice Agent — Guarded v2</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin:24px; line-height:1.44; }
@@ -18,7 +18,7 @@
 </style>
 </head>
 <body>
-<h1>Voice Agent — Guarded</h1>
+<h1>Voice Agent — Guarded v2</h1>
 
 <div class="row">
   <button id="beep-wa">Beep (WebAudio)</button>
@@ -38,36 +38,29 @@
 <pre id="log"></pre>
 
 <script>
-/* ===== helpers ===== */
 const $ = s => document.querySelector(s);
 const logEl = $('#log');
 function log(...a){ logEl.textContent += a.join(' ') + '\n'; logEl.scrollTop = logEl.scrollHeight; }
 function setStatus(s){ $('#status').textContent = s; }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-/* ===== global state & guard ===== */
 let pc=null, dc=null, localStream=null;
 let AGENT_STARTING = false;
 let AGENT_STARTED  = false;
 
-/* ===== audio unlock ===== */
 let audioCtx;
 async function beepWebAudio(ms=150, freq=880){
   try{
     const AC = window.AudioContext || window.webkitAudioContext;
     if(!audioCtx) audioCtx = new AC();
-    if(audioCtx.state==='suspended') await audioCtx.resume();
+    if(audioCtx.state==='suspended') { log('webaudio suspended; resuming'); await audioCtx.resume(); }
     const o = audioCtx.createOscillator(), g = audioCtx.createGain();
     o.type='sine'; o.frequency.value=freq; g.gain.value=0.08;
-    o.connect(g).connect(audioCtx.destination); o.start();
-    await sleep(ms); o.stop();
+    o.connect(g).connect(audioCtx.destination); o.start(); await sleep(ms); o.stop();
     log('WebAudio beep');
   }catch(e){ log('webaudio error:', e?.message||e); }
 }
-async function nudgeAudio(){
-  await beepWebAudio(60, 1200);
-  log('WebAudio nudge OK');
-}
+async function nudgeAudio(){ await beepWebAudio(60, 1200); log('WebAudio nudge OK'); }
 function beepAudioTag(){
   try{
     const a = new Audio();
@@ -84,57 +77,62 @@ async function unlockMicOnce(){
     log('microphone OK');
     return true;
   }catch(err){
-    log('mic error:', err?.message||err);
+    log('mic error:', err?.name||err?.message||err);
     return false;
   }
 }
 
-/* ===== UI state ===== */
 function updateButtons(){
   $('#start').disabled = AGENT_STARTING || AGENT_STARTED;
   $('#stop').disabled  = !(AGENT_STARTING || AGENT_STARTED);
   $('#force').disabled = !dc || dc.readyState!=='open';
 }
 
-/* ===== start/stop guarded ===== */
 async function startAgentOnce(){
   if (AGENT_STARTING || AGENT_STARTED){ log('start ignored (already starting/started)'); return; }
   AGENT_STARTING = true; updateButtons();
+  let watchdog;
   try{
     setStatus('preparing…');
-
-    // 0) make sure output audio is unlocked & mic permission is granted
+    log('start: step 1/7 nudge audio');
     await nudgeAudio();
-    const micOk = await unlockMicOnce();
-    if(!micOk){ setStatus('idle'); return; }
 
-    // 1) fetch short-lived client_secret
-    log('fetching short-lived client_secret…');
+    log('start: step 2/7 unlock mic');
+    const micOk = await unlockMicOnce();
+    if(!micOk){ setStatus('idle'); log('start aborted: mic not granted'); return; }
+
+    log('start: step 3/7 fetch /session');
+    watchdog = setTimeout(()=>{ log('watchdog: start seems stuck; retrying once'); AGENT_STARTING=false; updateButtons(); startAgentOnce(); }, 7000);
+
     const sessResp = await fetch('/session', { method:'POST' });
     if(!sessResp.ok){ throw new Error('session error '+sessResp.status); }
     const sess = await sessResp.json();
+    log('start: got session');
+
     const clientSecret = sess?.client_secret?.value;
     const model = sess?.model || 'gpt-4o-realtime-preview-2024-12-17';
     if(!clientSecret) throw new Error('no client_secret');
 
-    // 2) mic stream for real call
+    log('start: step 4/7 getUserMedia real');
     localStream = await navigator.mediaDevices.getUserMedia({ audio:true });
 
-    // 3) WebRTC
+    log('start: step 5/7 create RTCPeerConnection');
     pc = new RTCPeerConnection();
-    pc.onconnectionstatechange = () => log('pc state: '+pc.connectionState);
-    pc.oniceconnectionstatechange = () => log('ice state: '+pc.iceConnectionState);
+    pc.onconnectionstatechange = () => log('pc state:', pc.connectionState);
+    pc.oniceconnectionstatechange = () => log('ice state:', pc.iceConnectionState);
     pc.ontrack = (e)=>{ $('#out').srcObject = e.streams[0]; };
 
     dc = pc.createDataChannel('oai-events');
     dc.onopen  = () => { log('datachannel open'); updateButtons(); };
     dc.onclose = () => log('datachannel closed');
-    dc.onmessage = (ev)=>log('event: '+ev.data);
+    dc.onmessage = (ev)=>log('event:', ev.data);
 
     for(const t of localStream.getTracks()) pc.addTrack(t, localStream);
+    log('start: step 6/7 createOffer & setLocalDescription');
     const offer = await pc.createOffer({ offerToReceiveAudio:true });
     await pc.setLocalDescription(offer);
 
+    log('start: step 7/7 POST offer to OpenAI');
     const answerSDP = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`,{
       method:'POST',
       headers:{ 'Authorization':'Bearer '+clientSecret, 'Content-Type':'application/sdp' },
@@ -142,14 +140,16 @@ async function startAgentOnce(){
     }).then(r=>r.text());
 
     await pc.setRemoteDescription({ type:'answer', sdp:answerSDP });
+    clearTimeout(watchdog);
 
     AGENT_STARTED = true;
     setStatus('listening');
-    log('connected ✓ (speak to get a reply, or press Force reply)');
+    log('connected ✓ (speak to get a reply, or tap Force reply)');
     updateButtons();
   }catch(err){
+    clearTimeout(watchdog);
     setStatus('error');
-    log('start error:', err?.message||err);
+    log('start error:', err?.message||String(err));
   }finally{
     AGENT_STARTING = false; updateButtons();
   }
@@ -171,7 +171,6 @@ function forceReply(){
   log('force reply sent');
 }
 
-/* ===== wire UI ===== */
 $('#beep-wa').onclick = () => beepWebAudio();
 $('#beep-tag').onclick = () => beepAudioTag();
 $('#nudge').onclick   = () => nudgeAudio();
@@ -182,12 +181,11 @@ $('#force').onclick   = () => forceReply();
 
 setStatus('idle'); updateButtons();
 
-/* ===== auto-start handler (runs ONCE) ===== */
 window.addEventListener('load', async () => {
   const q = new URLSearchParams(location.search);
   if (q.get('auto') === '1') {
-    // small delay so Safari finishes painting; then guarded start
-    await sleep(400);
+    // give Safari an extra moment
+    await sleep(600);
     startAgentOnce();
   }
 });

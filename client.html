@@ -3,36 +3,69 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>Voice Agent — Guarded v3</title>
+<title>Voice Agent — Guarded v3 + Memory</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin:24px; line-height:1.44; }
   h1 { margin:0 0 12px; font-size:26px; }
   .row { display:flex; gap:10px; flex-wrap:wrap; margin:10px 0; }
-  button { font-size:16px; padding:10px 14px; border-radius:10px; border:1px solid #bbb; }
+  button, input, textarea { font-size:16px; }
+  button { padding:10px 14px; border-radius:10px; border:1px solid #bbb; }
   button:disabled{ opacity:.6 }
   #status { font-weight:700; }
-  #log { min-height:220px; border:1px solid #ddd; border-radius:10px; padding:12px; background:#f7f7f7;
+  #log { min-height:180px; border:1px solid #ddd; border-radius:10px; padding:12px; background:#f7f7f7;
          white-space:pre-wrap; overflow:auto; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
-  .note { opacity:.8; }
-
+  .note { opacity:.85; }
+  .panel { border:1px solid #ddd; border-radius:12px; padding:12px; margin:14px 0; background: color-mix(in oklab, Canvas 92%, black 8%) }
+  .panel h2 { margin:0 0 8px; font-size:18px; }
+  .field { display:flex; gap:8px; margin:6px 0; align-items:center; flex-wrap:wrap; }
+  .field input, .field textarea { flex: 1 1 260px; padding:8px 10px; border-radius:8px; border:1px solid #ccc; }
+  .small { font-size: 12px; opacity: .8; }
   /* overlay for auto mode */
   #tapOverlay {
     position: fixed; inset: 0; display: none; place-items:center;
-    background: color-mix(in oklab, Canvas 70%, black 30%);
-    backdrop-filter: blur(4px);
+    background: color-mix(in oklab, Canvas 70%, black 30%); backdrop-filter: blur(4px);
     z-index: 9999; text-align:center; padding: 24px;
   }
-  #tapOverlay .card {
-    border: 1px solid #ccc; border-radius: 14px; padding: 18px 20px; max-width: 460px;
-    background: color-mix(in oklab, Canvas 85%, black 15%);
-  }
+  #tapOverlay .card { border: 1px solid #ccc; border-radius: 14px; padding: 18px 20px; max-width: 460px;
+    background: color-mix(in oklab, Canvas 85%, black 15%); }
   #tapOverlay h2 { margin: 0 0 8px; font-size: 20px; }
   #tapOverlay p { margin: 0; opacity: .85; }
 </style>
 </head>
 <body>
-<h1>Voice Agent — Guarded v3</h1>
+<h1>Voice Agent — Guarded v3 + Memory</h1>
+
+<div class="panel">
+  <h2>Your Memory (saved to server)</h2>
+  <div class="small">User ID: <span id="uid"></span> <button id="copyUid">Copy</button></div>
+  <div class="field">
+    <label style="min-width:80px">Name:</label>
+    <input id="memName" placeholder="e.g., Alex Smith"/>
+    <button id="saveName">Save</button>
+  </div>
+  <div class="field">
+    <label style="min-width:80px">Kids:</label>
+    <input id="memKids" placeholder="Comma-separated: Ava, Ben, Chris"/>
+    <button id="saveKids">Save</button>
+  </div>
+  <div class="field">
+    <label style="min-width:80px">Tone:</label>
+    <input id="memTone" placeholder="e.g., witty, concise, encouraging"/>
+    <button id="saveTone">Save</button>
+  </div>
+  <div class="field">
+    <label style="min-width:80px">Persona:</label>
+    <input id="memPersona" placeholder="e.g., friendly coach, upbeat coworker"/>
+    <button id="savePersona">Save</button>
+  </div>
+  <div class="field">
+    <label style="min-width:80px">Add note:</label>
+    <input id="memNote" placeholder="Any fact you want Dummy to remember"/>
+    <button id="addNote">Add</button>
+  </div>
+  <div class="small">These are included in Dummy’s session so it can address you by name, remember family, and keep your tone/persona.</div>
+</div>
 
 <div class="row">
   <button id="beep-wa">Beep (WebAudio)</button>
@@ -51,7 +84,7 @@
 <audio id="out" autoplay playsinline></audio>
 <pre id="log"></pre>
 
-<!-- one-time user gesture for iOS audio -->
+<!-- one-time user gesture for iOS audio in auto mode -->
 <div id="tapOverlay" role="dialog" aria-modal="true">
   <div class="card">
     <h2>Tap to allow audio</h2>
@@ -60,15 +93,86 @@
 </div>
 
 <script>
+/* ===== helpers ===== */
 const $ = s => document.querySelector(s);
 const logEl = $('#log');
 function log(...a){ logEl.textContent += a.join(' ') + '\n'; logEl.scrollTop = logEl.scrollHeight; }
 function setStatus(s){ $('#status').textContent = s; }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+/* ===== stable user id ===== */
+function getOrCreateUid() {
+  const p = new URLSearchParams(location.search);
+  let id = p.get('u') || localStorage.getItem('dummy_uid');
+  if (!id) {
+    id = (crypto.randomUUID && crypto.randomUUID()) || Math.random().toString(36).slice(2);
+  }
+  localStorage.setItem('dummy_uid', id);
+  if (!p.get('u')) {
+    p.set('u', id);
+    const url = `${location.pathname}?${p.toString()}`;
+    history.replaceState(null, '', url);
+  }
+  $('#uid').textContent = id;
+  return id;
+}
+const USER_ID = getOrCreateUid();
+$('#copyUid').onclick = async () => {
+  await navigator.clipboard.writeText(new URL(location.href).toString());
+  alert('Link with your user ID copied.\nUse the same link on any device to keep your memory.');
+};
+
+/* ===== memory client ===== */
+async function memGet() {
+  const r = await fetch('/mem/get', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ user_id: USER_ID }) });
+  return r.json();
+}
+async function memPut(patch) {
+  const r = await fetch('/mem/put', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ user_id: USER_ID, patch }) });
+  return r.json();
+}
+function syncForm(mem) {
+  $('#memName').value   = mem?.profile?.name || '';
+  $('#memKids').value   = (mem?.profile?.kids || []).join(', ');
+  $('#memTone').value   = mem?.prefs?.tone || '';
+  $('#memPersona').value= mem?.prefs?.persona || '';
+}
+
+$('#saveName').onclick = async () => {
+  const name = $('#memName').value.trim();
+  if (!name) return;
+  const { memory } = await memPut({ profile: { name } });
+  syncForm(memory); log('Saved: name ->', name);
+};
+$('#saveKids').onclick = async () => {
+  const kids = $('#memKids').value.split(',').map(s=>s.trim()).filter(Boolean);
+  const { memory } = await memPut({ profile: { kids } });
+  syncForm(memory); log('Saved: kids ->', kids.join(', '));
+};
+$('#saveTone').onclick = async () => {
+  const tone = $('#memTone').value.trim();
+  const { memory } = await memPut({ prefs: { tone } });
+  syncForm(memory); log('Saved: tone ->', tone);
+};
+$('#savePersona').onclick = async () => {
+  const persona = $('#memPersona').value.trim();
+  const { memory } = await memPut({ prefs: { persona } });
+  syncForm(memory); log('Saved: persona ->', persona);
+};
+$('#addNote').onclick = async () => {
+  const v = $('#memNote').value.trim();
+  if (!v) return;
+  const r = await memGet();
+  const notes = r?.memory?.notes || [];
+  notes.push(v);
+  const { memory } = await memPut({ notes });
+  $('#memNote').value = '';
+  log('Added note.');
+};
+
+/* ===== audio & realtime (same guarded flow you have) ===== */
 let pc=null, dc=null, localStream=null;
-let AGENT_STARTING = false;
-let AGENT_STARTED  = false;
+let AGENT_STARTING = false, AGENT_STARTED = false;
 
 let audioCtx;
 async function beepWebAudio(ms=150, freq=880){
@@ -103,7 +207,6 @@ async function unlockMicOnce(){
     return false;
   }
 }
-
 function updateButtons(){
   $('#start').disabled = AGENT_STARTING || AGENT_STARTED;
   $('#stop').disabled  = !(AGENT_STARTING || AGENT_STARTED);
@@ -116,20 +219,20 @@ async function startAgentOnce(){
   let watchdog;
   try{
     setStatus('preparing…');
-    log('start: step 1/7 nudge audio');
-    await nudgeAudio();
-
-    log('start: step 2/7 unlock mic');
-    const micOk = await unlockMicOnce();
+    log('start: step 1/7 nudge audio'); await nudgeAudio();
+    log('start: step 2/7 unlock mic'); const micOk = await unlockMicOnce();
     if(!micOk){ setStatus('idle'); log('start aborted: mic not granted'); return; }
 
     log('start: step 3/7 fetch /session');
-    watchdog = setTimeout(()=>{ log('watchdog: start seems stuck; retrying once'); AGENT_STARTING=false; updateButtons(); startAgentOnce(); }, 7000);
+    watchdog = setTimeout(()=>{ log('watchdog: start stuck; retrying once'); AGENT_STARTING=false; updateButtons(); startAgentOnce(); }, 7000);
 
-    const sessResp = await fetch('/session', { method:'POST' });
+    const sessResp = await fetch('/session', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ user_id: USER_ID })
+    });
     if(!sessResp.ok){ throw new Error('session error '+sessResp.status); }
-    const sess = await sessResp.json();
-    log('start: got session');
+    const sess = await sessResp.json(); log('start: got session');
 
     const clientSecret = sess?.client_secret?.value;
     const model = sess?.model || 'gpt-4o-realtime-preview-2024-12-17';
@@ -166,7 +269,7 @@ async function startAgentOnce(){
 
     AGENT_STARTED = true;
     setStatus('listening');
-    log('connected ✓ (speak to get a reply, or tap Force reply)');
+    log('connected ✓ (speak, or tap Force reply)');
     updateButtons();
   }catch(err){
     clearTimeout(watchdog);
@@ -193,6 +296,7 @@ function forceReply(){
   log('force reply sent');
 }
 
+/* UI wires */
 $('#beep-wa').onclick = () => beepWebAudio();
 $('#beep-tag').onclick = () => beepAudioTag();
 $('#nudge').onclick   = () => nudgeAudio();
@@ -201,16 +305,19 @@ $('#start').onclick   = () => startAgentOnce();
 $('#stop').onclick    = () => stopAgent();
 $('#force').onclick   = () => forceReply();
 
-setStatus('idle'); updateButtons();
+/* Load memory into form on first load */
+memGet().then(r => { if (r?.memory) syncForm(r.memory); }).catch(()=>{});
 
+/* Auto-start overlay (iOS gesture) */
 const tapOverlay = $('#tapOverlay');
 function showTapOverlay(){ tapOverlay.style.display = 'grid'; }
 function hideTapOverlay(){ tapOverlay.style.display = 'none'; }
 
+setStatus('idle'); updateButtons();
+
 window.addEventListener('load', async () => {
   const q = new URLSearchParams(location.search);
   if (q.get('auto') === '1') {
-    // If audio context will be suspended, request a quick tap first.
     const AC = window.AudioContext || window.webkitAudioContext;
     const probe = new AC();
     if (probe.state === 'suspended') {
@@ -224,7 +331,7 @@ window.addEventListener('load', async () => {
       };
       document.addEventListener('pointerdown', onTap, true);
     } else {
-      await sleep(400); // tiny paint delay
+      await sleep(400);
       startAgentOnce();
     }
   }

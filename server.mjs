@@ -1,4 +1,9 @@
 // server.mjs
+// A single-file Express server for your Voice Agent
+// - Serves client.html
+// - Creates short-lived OpenAI Realtime sessions (/session)
+// - Simple Upstash-Redis memory via REST (/memory/get, /memory/set)
+
 import express from "express";
 import path from "path";
 import cors from "cors";
@@ -21,7 +26,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL; // e.g. https://us1-shiny-12345.upstash.io
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 
-// A small helper to call Upstash REST
+// Small helper to call Upstash REST
 async function redisGet(key) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
   const res = await fetch(`${UPSTASH_URL}/get/${encodeURIComponent(key)}`, {
@@ -29,152 +34,123 @@ async function redisGet(key) {
   });
   if (!res.ok) return null;
   const data = await res.json(); // { result: "value" }
-  return data.result ?? null;
+  try {
+    return data.result ? JSON.parse(data.result) : null;
+  } catch {
+    return data.result ?? null;
+  }
 }
 
 async function redisSet(key, value) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return false;
   const res = await fetch(
     `${UPSTASH_URL}/set/${encodeURIComponent(key)}/${encodeURIComponent(
-      value
+      JSON.stringify(value)
     )}`,
     { headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` } }
   );
   return res.ok;
 }
 
-// Build instruction text from saved memory
-function memoryToInstructions(mem) {
-  if (!mem) return "";
-  const bits = [];
-  if (mem.name) bits.push(`User's name is ${mem.name}. Address them by name.`);
-  if (Array.isArray(mem.kids) && mem.kids.length) {
-    bits.push(`User has children: ${mem.kids.join(", ")}.`);
-  }
-  if (mem.tone)
-    bits.push(`Use this tone with the user: ${mem.tone}.`);
-  if (mem.persona)
-    bits.push(`Adopt this persona: ${mem.persona}.`);
-  if (Array.isArray(mem.notes) && mem.notes.length) {
-    bits.push(`Keep in mind: ${mem.notes.join(" | ")}.`);
-  }
-  return bits.join(" ");
-}
+// ---------- Health ----------
+app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// ---------- Memory API ----------
-// GET /memory/get?userId=abc
-app.get("/memory/get", async (req, res) => {
+// ---------- Serve client ----------
+app.get("/", (_req, res) =>
+  res.sendFile(path.join(__dirname, "client.html"))
+);
+app.get("/client.html", (_req, res) =>
+  res.sendFile(path.join(__dirname, "client.html"))
+);
+
+// ---------- OpenAI Realtime session ----------
+app.post("/session", async (_req, res) => {
   try {
-    const { userId } = req.query;
-    if (!userId) return res.status(400).json({ error: "Missing userId" });
-    const raw = await redisGet(`mem:${userId}`);
-    const mem = raw ? JSON.parse(raw) : {};
-    return res.json({ ok: true, memory: mem });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-// POST /memory/set
-// body: { userId, name?, kids? (string or array), tone?, persona?, note? (single note to add) }
-app.post("/memory/set", async (req, res) => {
-  try {
-    const { userId } = req.body || {};
-    if (!userId) return res.status(400).json({ error: "Missing userId" });
-
-    // Load current memory
-    const raw = await redisGet(`mem:${userId}`);
-    const current = raw ? JSON.parse(raw) : {};
-
-    // Merge updates
-    const next = { ...current };
-    if (typeof req.body.name === "string") next.name = req.body.name.trim();
-
-    if (Array.isArray(req.body.kids)) {
-      next.kids = req.body.kids.map((k) => String(k).trim()).filter(Boolean);
-    } else if (typeof req.body.kids === "string") {
-      next.kids = req.body.kids
-        .split(",")
-        .map((k) => k.trim())
-        .filter(Boolean);
+    if (!OPENAI_API_KEY) {
+      return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
     }
-
-    if (typeof req.body.tone === "string") next.tone = req.body.tone.trim();
-    if (typeof req.body.persona === "string")
-      next.persona = req.body.persona.trim();
-
-    if (typeof req.body.note === "string" && req.body.note.trim()) {
-      next.notes = Array.isArray(next.notes) ? next.notes : [];
-      next.notes.push(req.body.note.trim());
-    }
-
-    await redisSet(`mem:${userId}`, JSON.stringify(next));
-    return res.json({ ok: true, memory: next });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-// ---------- Realtime session token endpoint ----------
-// The client calls this to get a short-lived client_secret for WebRTC
-app.post("/session", async (req, res) => {
-  try {
-    const { userId } = req.body || {};
-    // Look up memory for this user and blend into instructions
-    let mem = null;
-    if (userId) {
-      const raw = await redisGet(`mem:${userId}`);
-      mem = raw ? JSON.parse(raw) : null;
-    }
-
-    const memoryText = memoryToInstructions(mem);
-
-    const resp = await fetch("https://api.openai.com/v1/realtime/sessions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-realtime-preview-2024-12-17",
-        // Your base agent settings:
-        voice: "verse",
-        modalities: ["audio", "text"],
-        turn_detection: {
-          type: "server_vad",
-          threshold: 0.75,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 700,
-          create_response: false,
-          interrupt_response: true,
+    const sessionRes = await fetch(
+      "https://api.openai.com/v1/realtime/sessions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
         },
-        // Fold memory into the system instructions:
-        instructions:
-          "You are Dummy, a concise, friendly voice assistant. Keep replies short unless asked. Speak when the user addresses you. " +
-          (memoryText ? `Personalization: ${memoryText}` : ""),
-      }),
-    });
+        body: JSON.stringify({
+          model: "gpt-4o-realtime-preview-2024-12-17",
+          modalities: ["audio", "text"],
+          // These defaults are safe; the client can still set VAD/params.
+          voice: "verse",
+          output_audio_format: "pcm16",
+          tool_choice: "auto",
+          temperature: 0.8,
+          max_response_output_tokens: "inf",
+          // Keep the assistant brief unless asked:
+          instructions:
+            "You are Dummy, a concise, friendly voice assistant. Keep replies short unless asked. Speak when the user addresses you.",
+        }),
+      }
+    );
 
-    if (!resp.ok) {
-      const text = await resp.text();
-      return res.status(500).json({ error: `OpenAI error: ${text}` });
+    if (!sessionRes.ok) {
+      const text = await sessionRes.text();
+      return res.status(sessionRes.status).send(text);
     }
 
-    const data = await resp.json();
-    return res.json(data);
+    const json = await sessionRes.json();
+    // Should include client_secret.value and expires_at
+    return res.json(json);
   } catch (e) {
+    console.error("POST /session error:", e);
     return res.status(500).json({ error: e.message });
   }
 });
 
-// ---------- Static files ----------
-app.use(express.static(__dirname)); // serve client.html and assets from repo root
+// ---------- Memory (simple GET endpoints for Safari & the panel) ----------
+app.get("/memory/get", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: "Missing userId" });
+    const key = `memory:${userId}`;
+    const value = (await redisGet(key)) ?? {};
+    return res.json({ ok: true, memory: value });
+  } catch (e) {
+    console.error("GET /memory/get error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+});
 
-app.get("/", (_req, res) => {
-  res.sendFile(path.join(__dirname, "client.html"));
+app.get("/memory/set", async (req, res) => {
+  try {
+    const { userId, name, kids, tone, persona, note } = req.query;
+    if (!userId) return res.status(400).json({ error: "Missing userId" });
+
+    const key = `memory:${userId}`;
+    const current = (await redisGet(key)) ?? {};
+
+    if (name) current.name = name;
+    if (kids)
+      current.kids = kids
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    if (tone) current.tone = tone;
+    if (persona) current.persona = persona;
+    if (note) {
+      current.notes = Array.isArray(current.notes) ? current.notes : [];
+      current.notes.push(note);
+    }
+
+    await redisSet(key, current);
+    return res.json({ ok: true, memory: current });
+  } catch (e) {
+    console.error("GET /memory/set error:", e);
+    return res.status(500).json({ error: e.message });
+  }
 });
 
 // ---------- Start ----------
 app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+  console.log(`Voice Agent server listening on http://localhost:${PORT}`);
 });

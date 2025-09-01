@@ -1,4 +1,4 @@
-// server.mjs — stable realtime token server with safer defaults
+// server.mjs — stable token server (auto-reply enabled)
 import 'dotenv/config';
 import express from 'express';
 import path from 'path';
@@ -9,7 +9,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
-// Basic CORS
+// Basic CORS so the browser can call us
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -19,29 +19,34 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json());
+
+// Serve the client file(s) from project root (client.html, etc.)
 app.use(express.static(__dirname));
 
-// Convenience: hitting root serves client.html
+// Convenience: visiting root serves client.html
 app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'client.html')));
 
-// Mint short-lived client_secret for browser
+// Create a short-lived Realtime session token for the browser
 app.all('/session', async (_req, res) => {
   try {
     const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: 'Missing OPENAI_API_KEY' });
+    if (!apiKey) {
+      return res.status(500).json({ error: 'Missing OPENAI_API_KEY (Render → Environment)' });
+    }
 
-    // IMPORTANT: turn_detection.create_response = false to stop babbling
-    const body = {
+    // ⬇⬇ IMPORTANT: create_response: true so it will speak when you speak
+    const sessionConfig = {
       model: process.env.REALTIME_MODEL || 'gpt-4o-realtime-preview-2024-12-17',
       voice: 'verse',
       instructions:
-        "You are Dummy, a concise, friendly voice assistant. Do not speak unless the user clearly addresses you. Keep replies short unless asked.",
+        "You are Dummy, a concise, friendly voice assistant. Keep replies short unless asked. Speak when the user addresses you.",
       turn_detection: {
         type: 'server_vad',
         threshold: 0.75,
-        silence_duration_ms: 700,
         prefix_padding_ms: 300,
-        create_response: false // <-- you only reply when triggered, not on every noise
+        silence_duration_ms: 700,
+        create_response: true,          // <-- was false; now true
+        interrupt_response: true
       }
     };
 
@@ -51,11 +56,12 @@ app.all('/session', async (_req, res) => {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify(sessionConfig)
     });
 
     const data = await r.json();
     if (!r.ok) return res.status(r.status).json(data);
+
     res.json(data);
   } catch (err) {
     console.error('SESSION ERROR:', err);

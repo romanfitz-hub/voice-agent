@@ -1,4 +1,4 @@
-// server.mjs — full file (REST, no SDK). Adds clear console markers.
+// server.mjs — REST only (no SDK). Metadata removed.
 
 import express from "express";
 import cors from "cors";
@@ -19,15 +19,14 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || "";
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || "";
 
-// ------- Upstash helpers (REST) -------
+// ---- Upstash helpers (REST)
 async function redisGet(key) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
   const r = await fetch(`${UPSTASH_URL}/get/${encodeURIComponent(key)}`, {
     headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
   });
   if (!r.ok) return null;
-  const j = await r.json();
-  return j?.result ?? null;
+  try { const j = await r.json(); return j?.result ?? null; } catch { return null; }
 }
 
 async function redisSet(key, value) {
@@ -39,18 +38,18 @@ async function redisSet(key, value) {
   return r.ok;
 }
 
-// ------- static client -------
+// ---- static client
 app.get("/", (_, res) => {
   res.sendFile(path.join(__dirname, "client.html"));
 });
 
-// ------- memory API -------
+// ---- memory API
 app.get("/memory/get", async (req, res) => {
   const userId = (req.query.userId || "").toString().trim();
   if (!userId) return res.status(400).json({ error: "Missing userId" });
-  const raw = await redisGet(`user:${userId}`);
   let memory = {};
-  try { if (raw) memory = JSON.parse(raw); } catch {}
+  const raw = await redisGet(`user:${userId}`);
+  if (raw) { try { memory = JSON.parse(raw) || {}; } catch {} }
   res.json({ ok: true, memory });
 });
 
@@ -71,19 +70,17 @@ app.get("/memory/set", async (req, res) => {
   res.json({ ok: saved, saved });
 });
 
-// ------- session API (REST, NOT SDK) -------
+// ---- session API (Realtime REST)
 app.get("/session", async (req, res) => {
-  console.log("SESSION ROUTE: USING_FETCH_FOR_SESSION"); // marker
+  console.log("SESSION ROUTE: USING_FETCH_FOR_SESSION");
   try {
     if (!OPENAI_API_KEY) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
 
     const userId = (req.query.userId || "").toString().trim();
     let name = "";
     if (userId) {
-      try {
-        const raw = await redisGet(`user:${userId}`);
-        if (raw) { const m = JSON.parse(raw); if (m?.name) name = m.name; }
-      } catch {}
+      const raw = await redisGet(`user:${userId}`);
+      if (raw) { try { const m = JSON.parse(raw); if (m?.name) name = m.name; } catch {} }
     }
 
     const instructions = [
@@ -99,8 +96,8 @@ app.get("/session", async (req, res) => {
       modalities: ["audio", "text"],
       instructions,
       tool_choice: "auto",
-      turn_detection: { type: "server_vad", threshold: 0.8 },
-      metadata: userId ? { userId } : undefined,
+      turn_detection: { type: "server_vad", threshold: 0.8 }
+      // (no metadata — the API rejected it)
     };
 
     const r = await fetch("https://api.openai.com/v1/realtime/sessions", {
@@ -127,7 +124,6 @@ app.get("/session", async (req, res) => {
   }
 });
 
-// ------- start -------
 app.listen(PORT, () => {
   console.log(`Dummy server listening on :${PORT}`);
 });

@@ -2,204 +2,271 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Voice Agent — Guarded v3 + Memory</title>
   <style>
-    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial; padding: 16px; line-height: 1.4; }
-    h1 { margin: 0 0 16px; }
-    .card { background: #f3f3f3; padding: 14px; border-radius: 12px; margin-bottom: 16px; }
-    label { display:block; font-weight: 600; margin: 14px 0 6px; }
-    input { width:100%; font-size:17px; padding:10px 12px; border:1px solid #bbb; border-radius:10px; }
-    button { font-size:17px; padding:10px 14px; border-radius:12px; border:0; background:#e6e6e6; margin-top:10px; }
-    .row { display:flex; gap:12px; flex-wrap:wrap; margin: 8px 0 0; }
-    .ok { color:#0a7a0a; margin-left:8px; font-weight:600; }
-    pre { white-space:pre-wrap; word-break:break-word; background:#fafafa; padding:10px; border-radius:10px; border:1px solid #eee; }
+    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, sans-serif; margin: 16px; }
+    h1 { margin: 0 0 12px; }
+    button { font-size: 18px; padding: 10px 14px; margin: 8px 10px 8px 0; border-radius: 12px; border: none; background:#e5e7eb; }
+    button.primary { background:#e0e7ff; }
+    button[disabled] { opacity:.5 }
+    #log { white-space: pre-wrap; font-family: ui-monospace, Menlo, monospace; background:#f7f7f7; padding:12px; border-radius:12px; }
+    .card { background:#f3f4f6; padding:14px; border-radius:16px; margin: 12px 0; }
+    input { font-size: 18px; padding: 10px 12px; width: 100%; box-sizing: border-box; border-radius: 12px; border: 1px solid #ddd; }
+    .row { display:flex; gap:10px; align-items:center; margin: 6px 0; }
+    .row button { margin: 0; }
+    .pill { display:inline-block; background:#e5e7eb; padding:2px 8px; border-radius:999px; font-size:12px; margin-left:6px; }
   </style>
 </head>
 <body>
   <h1>Voice Agent — Guarded v3 + Memory</h1>
 
   <div class="card">
-    <div>Your Memory (saved to server)</div>
-    <div style="font-size:13px; opacity:.8; margin-top:6px;">
-      User ID: <span id="uid"></span>
-      <button id="copyId" style="margin-left:8px;">Copy</button>
+    <div><strong>Your Memory (saved to server)</strong></div>
+    <div id="uidRow" style="margin:8px 0 12px 0">
+      <span>User ID:</span>
+      <span id="uid" class="pill"></span>
     </div>
 
-    <label for="name">Name:</label>
-    <input id="name" placeholder="e.g., Alex Smith" />
     <div class="row">
-      <button id="saveName">Save</button><span id="savedName" class="ok"></span>
+      <label style="min-width:80px">Name:</label>
+      <input id="nameInput" placeholder="e.g., Alex Smith" />
+      <button id="saveNameBtn">Save</button>
+      <span id="nameSaveStatus" class="pill"></span>
     </div>
 
-    <label for="kids">Kids:</label>
-    <input id="kids" placeholder="Comma-separated: Ava, Ben, Chris" />
     <div class="row">
-      <button id="saveKids">Save</button><span id="savedKids" class="ok"></span>
+      <label style="min-width:80px">Kids:</label>
+      <input id="kidsInput" placeholder="Comma-separated: Ava, Ben, Chris" />
+      <button id="saveKidsBtn">Save</button>
+      <span id="kidsSaveStatus" class="pill"></span>
     </div>
-
-    <label for="tone">Tone:</label>
-    <input id="tone" placeholder="e.g., witty, concise, encouraging" />
-    <div class="row">
-      <button id="saveTone">Save</button><span id="savedTone" class="ok"></span>
-    </div>
-
-    <label for="persona">Persona:</label>
-    <input id="persona" placeholder="e.g., friendly coach, upbeat coworker" />
-    <div class="row">
-      <button id="savePersona">Save</button><span id="savedPersona" class="ok"></span>
-    </div>
-
-    <p style="font-size:13px; opacity:.8; margin-top:10px;">
-      These are included in Dummy’s session so it can greet you by name, remember family, and keep your tone/persona.
-    </p>
   </div>
 
   <div class="row">
     <button id="beepWA">Beep (WebAudio)</button>
     <button id="beepAT">Beep (AudioTag)</button>
+  </div>
+  <div class="row">
     <button id="nudge">Nudge audio</button>
     <button id="unlock">Unlock mic</button>
   </div>
   <div class="row">
-    <button id="start">Start voice agent</button>
-    <button id="stop" disabled>Stop</button>
-    <button id="force" disabled>Force reply</button>
+    <button id="start" class="primary">Start voice agent</button>
+    <button id="stop">Stop</button>
+    <button id="force">Force reply</button>
   </div>
 
-  <div style="margin-top:10px;">Status: <b id="status">idle</b></div>
-  <pre id="log"></pre>
+  <div style="margin:10px 0">Status: <strong id="status">idle</strong></div>
+  <div id="log"></div>
+
+  <!-- hidden audio sink for remote stream -->
+  <audio id="remoteAudio" autoplay playsinline></audio>
 
 <script>
-(function () {
-  // ---------- simple logger ----------
-  const log = (m) => { const el = document.getElementById('log'); el.textContent += (el.textContent ? "\n" : "") + m; el.scrollTop = el.scrollHeight; };
+(() => {
+  // ---------- helpers ----------
+  const $ = (id) => document.getElementById(id);
+  const log = (...args) => { console.log(...args); const s = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' '); $('log').textContent += s + "\n"; };
+  const setStatus = (t) => $('status').textContent = t;
 
-  // ---------- stable userId per browser ----------
-  const uidEl = document.getElementById('uid');
-  let userId = localStorage.getItem('dummy_user_id');
-  if (!userId) {
-    userId = crypto.randomUUID();
-    localStorage.setItem('dummy_user_id', userId);
-  }
-  uidEl.textContent = userId;
-  document.getElementById('copyId').onclick = () => navigator.clipboard.writeText(userId);
+  // ---------- UI elements ----------
+  const btnBeepWA  = $('beepWA');
+  const btnBeepAT  = $('beepAT');
+  const btnNudge   = $('nudge');
+  const btnUnlock  = $('unlock');
+  const btnStart   = $('start');
+  const btnStop    = $('stop');
+  const btnForce   = $('force');
+  const nameInput  = $('nameInput');
+  const kidsInput  = $('kidsInput');
+  const nameSaveStatus = $('nameSaveStatus');
+  const kidsSaveStatus = $('kidsSaveStatus');
 
-  // ---------- memory helpers ----------
-  async function memGet() {
-    const res = await fetch(`/memory/get?userId=${encodeURIComponent(userId)}`);
-    return await res.json(); // { ok:true, memory:{...} }
-  }
-  async function memSet(key, value) {
-    // use POST (primary)
-    const res = await fetch('/memory/set', {
-      method: 'POST',
-      headers: { 'Content-Type':'application/json' },
-      body: JSON.stringify({ userId, key, value })
-    });
-    return await res.json(); // { ok:true, saved:true }
-  }
+  const remoteAudio = $('remoteAudio');
 
-  // load memory on page load
-  (async () => {
+  // ---------- state ----------
+  const MODEL = "gpt-4o-realtime-preview-2024-12-17";
+  const VOICE = "verse";
+  const baseURL = location.origin;
+
+  // use URL param `userId` if present, otherwise a stable default you’ve used earlier
+  const urlParams = new URLSearchParams(location.search);
+  const userId = urlParams.get("userId") || "e6c9ba1f-b388-49e4-95d6-8fff48d954d7"; // your ID
+
+  $('uid').textContent = userId;
+
+  let pc = null;          // RTCPeerConnection
+  let dc = null;          // data channel
+  let micStream = null;   // MediaStream
+
+  // ---------- memory UI ----------
+  async function refreshMemoryUI() {
     try {
-      const data = await memGet();
-      const m = data.memory || {};
-      if (m.name)    document.getElementById('name').value = m.name;
-      if (m.kids)    document.getElementById('kids').value = m.kids;
-      if (m.tone)    document.getElementById('tone').value = m.tone;
-      if (m.persona) document.getElementById('persona').value = m.persona;
-    } catch (e) { console.error(e); }
-  })();
-
-  // wire up save buttons
-  document.getElementById('saveName').onclick = async () => {
-    const v = document.getElementById('name').value.trim();
-    const r = await memSet('name', v);
-    document.getElementById('savedName').textContent = r.saved ? 'Saved ✓' : 'Failed';
-    setTimeout(()=>document.getElementById('savedName').textContent='', 2000);
-  };
-  document.getElementById('saveKids').onclick = async () => {
-    const v = document.getElementById('kids').value.trim();
-    const r = await memSet('kids', v);
-    document.getElementById('savedKids').textContent = r.saved ? 'Saved ✓' : 'Failed';
-    setTimeout(()=>document.getElementById('savedKids').textContent='', 2000);
-  };
-  document.getElementById('saveTone').onclick = async () => {
-    const v = document.getElementById('tone').value.trim();
-    const r = await memSet('tone', v);
-    document.getElementById('savedTone').textContent = r.saved ? 'Saved ✓' : 'Failed';
-    setTimeout(()=>document.getElementById('savedTone').textContent='', 2000);
-  };
-  document.getElementById('savePersona').onclick = async () => {
-    const v = document.getElementById('persona').value.trim();
-    const r = await memSet('persona', v);
-    document.getElementById('savedPersona').textContent = r.saved ? 'Saved ✓' : 'Failed';
-    setTimeout(()=>document.getElementById('savedPersona').textContent='', 2000);
-  };
-
-  // ---- the rest is your existing agent code (beep/nudge/start...) ----
-  const statusEl = document.getElementById('status');
-  function setStatus(s){ statusEl.textContent = s; }
-
-  const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  const beep = () => { const o=ctx.createOscillator(); const g=ctx.createGain(); o.frequency.value=880; o.connect(g); g.connect(ctx.destination); g.gain.setValueAtTime(0.0001, ctx.currentTime); g.gain.exponentialRampToValueAtTime(0.2, ctx.currentTime+0.02); o.start(); setTimeout(()=>{ g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime+0.2); setTimeout(()=>o.stop(),220);},120); };
-  document.getElementById('beepWA').onclick = () => { if (ctx.state==='suspended') ctx.resume(); beep(); log('WebAudio beep'); };
-  document.getElementById('beepAT').onclick = () => { const a=new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQgAAA=='); a.play(); log('AudioTag beep'); };
-  document.getElementById('nudge').onclick = () => { if (ctx.state==='suspended') ctx.resume(); beep(); log('WebAudio nudge OK'); };
-  document.getElementById('unlock').onclick = async () => { await navigator.mediaDevices.getUserMedia({audio:true}); log('microphone OK'); };
-
-  let pc, dc, micStream, micTrack;
-  document.getElementById('start').onclick = async () => {
-    try {
-      setStatus('preparing...');
-      if (ctx.state==='suspended') await ctx.resume();
-      beep(); log('start: step 1/7 nudge audio');
-
-      log('start: step 2/7 unlock mic');
-      micStream = await navigator.mediaDevices.getUserMedia({audio:true}); log('microphone OK');
-
-      log('start: step 3/7 fetch /session');
-      const session = await fetch('/session').then(r=>r.json()); // your server should already support this from earlier work
-      log('start: got session');
-
-      log('start: step 4/7 getUserMedia real');
-      micTrack = micStream.getTracks()[0];
-
-      log('start: step 5/7 create RTCPeerConnection');
-      pc = new RTCPeerConnection();
-      pc.addTrack(micTrack, micStream);
-      dc = pc.createDataChannel('oai');
-      dc.onopen = ()=>log('datachannel open');
-
-      pc.oniceconnectionstatechange = ()=>log('ice state: '+pc.iceConnectionState);
-      pc.onconnectionstatechange   = ()=>log('pc state: '+pc.connectionState);
-
-      log('start: step 6/7 createOffer & setLocalDescription');
-      const offer = await pc.createOffer({offerToReceiveAudio:true});
-      await pc.setLocalDescription(offer);
-
-      log('start: step 7/7 POST offer to OpenAI');
-      const ans = await fetch('https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', {
-        method:'POST',
-        headers:{ Authorization:`Bearer ${session.client_secret.value}`, 'Content-Type':'application/sdp' },
-        body: offer.sdp
-      }).then(r=>r.text());
-
-      await pc.setRemoteDescription({ type:'answer', sdp: ans });
-      setStatus('listening');
-      log('connected ✓ (speak, or tap Force reply)');
+      const r = await fetch(`${baseURL}/memory/get?userId=${encodeURIComponent(userId)}`);
+      const j = await r.json();
+      log("memory/get:", j);
+      nameInput.value = j?.memory?.name || "";
+      kidsInput.value = Array.isArray(j?.memory?.kids) ? j.memory.kids.join(", ") : (j?.memory?.kids || "");
     } catch (e) {
-      setStatus('idle'); log('start error: '+(e?.message||e));
+      log("memory/get failed", e);
+    }
+  }
+
+  async function saveMem(key, value) {
+    const body = { userId, key, value };
+    try {
+      const r = await fetch(`${baseURL}/memory/set`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      const j = await r.json();
+      log("memory/set:", j);
+      return j?.ok === true;
+    } catch (e) {
+      log("memory/set failed", e);
+      return false;
+    }
+  }
+
+  $('saveNameBtn').onclick = async () => {
+    nameSaveStatus.textContent = "saving…";
+    const ok = await saveMem("name", nameInput.value.trim());
+    nameSaveStatus.textContent = ok ? "Saved" : "Failed";
+  };
+  $('saveKidsBtn').onclick = async () => {
+    kidsSaveStatus.textContent = "saving…";
+    const v = kidsInput.value.trim();
+    const value = v.includes(",") ? v.split(",").map(s => s.trim()).filter(Boolean) : v;
+    const ok = await saveMem("kids", value);
+    kidsSaveStatus.textContent = ok ? "Saved" : "Failed";
+  };
+
+  // ---------- audio helpers ----------
+  btnBeepWA.onclick = () => {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator(); o.frequency.value = 880;
+    const g = ctx.createGain(); g.gain.value = 0.05;
+    o.connect(g).connect(ctx.destination); o.start(); setTimeout(() => { o.stop(); }, 120);
+    log("WebAudio beep");
+  };
+  btnBeepAT.onclick = () => {
+    const a = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=");
+    a.play(); log("AudioTag beep");
+  };
+  btnNudge.onclick = btnBeepWA.onclick;
+
+  btnUnlock.onclick = async () => {
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      log("microphone OK");
+    } catch (e) {
+      log("microphone error:", e);
     }
   };
 
-  document.getElementById('stop').onclick = () => {
-    setStatus('idle'); log('stopping…');
-    try { dc && dc.close(); } catch {}
-    try { pc && pc.close(); } catch {}
-    try { micTrack && micTrack.stop(); } catch {}
+  // ---------- WebRTC start/stop ----------
+  btnStart.onclick = async () => {
+    setStatus("starting…");
+    $('log').textContent = "";
+
+    try {
+      if (!micStream) {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        log("microphone OK (auto)");
+      }
+
+      // 1) get a short-lived client secret from our server
+      log("start: step 3/7 fetch /session");
+      const s = await fetch(`${baseURL}/session?userId=${encodeURIComponent(userId)}`);
+      const session = await s.json();
+      if (!session?.client_secret?.value) throw new Error("No client secret from /session");
+      log("start: got session");
+
+      // 2) RTCPeerConnection
+      log("start: step 5/7 create RTCPeerConnection");
+      pc = new RTCPeerConnection();
+
+      // play remote audio
+      pc.ontrack = (ev) => {
+        remoteAudio.srcObject = ev.streams[0];
+      };
+
+      // data channel for events
+      dc = pc.createDataChannel("oai-events");
+      dc.onopen = () => { log("datachannel open"); setStatus("listening"); };
+      dc.onmessage = (e) => { log("event:", e.data.slice(0, 400)); };
+
+      // send microphone
+      micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
+
+      // 3) SDP offer → OpenAI
+      log("start: step 6/7 createOffer & setLocalDescription");
+      const offer = await pc.createOffer({ offerToReceiveAudio: true });
+      await pc.setLocalDescription(offer);
+
+      log("start: step 7/7 POST offer to OpenAI");
+      const resp = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(MODEL)}&voice=${encodeURIComponent(VOICE)}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${session.client_secret.value}`,
+          "Content-Type": "application/sdp"
+        },
+        body: offer.sdp
+      });
+
+      const answer = { type: "answer", sdp: await resp.text() };
+      await pc.setRemoteDescription(answer);
+
+      pc.oniceconnectionstatechange = () => log("ice state:", pc.iceConnectionState);
+      pc.onconnectionstatechange = () => log("pc state:", pc.connectionState);
+
+      log("connected ✓ (speak, or tap Force reply)");
+    } catch (e) {
+      log("start error:", e.message || e.toString());
+      setStatus("idle");
+    }
   };
+
+  btnStop.onclick = () => {
+    try {
+      if (dc && dc.readyState === "open") dc.close();
+      if (pc) pc.close();
+      dc = null; pc = null;
+      if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+      remoteAudio.srcObject = null;
+      setStatus("idle");
+      log("stopping…");
+    } catch (e) {
+      log("stop error", e);
+    }
+  };
+
+  // Force the model to speak even if no VAD trigger happened
+  btnForce.onclick = () => {
+    try {
+      if (!dc || dc.readyState !== "open") { log("force: datachannel not open"); return; }
+      // optional: tell the server we’re done talking
+      dc.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+      // ask for a reply
+      const name = (nameInput.value || "").trim();
+      const greet = name ? `Say: Hello ${name}. I can hear you.` : "Say: Hello. I can hear you.";
+      dc.send(JSON.stringify({
+        type: "response.create",
+        response: {
+          modalities: ["audio"],
+          instructions: greet
+        }
+      }));
+      log("force: sent response.create");
+    } catch (e) {
+      log("force error:", e);
+    }
+  };
+
+  // boot
+  refreshMemoryUI();
 })();
 </script>
 </body>

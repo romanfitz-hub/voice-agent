@@ -1,4 +1,4 @@
-// server.mjs — full file
+// server.mjs — full file (REST, no SDK). Adds clear console markers.
 
 import express from "express";
 import cors from "cors";
@@ -6,30 +6,27 @@ import bodyParser from "body-parser";
 import path from "path";
 import { fileURLToPath } from "url";
 
-// ---- paths ----
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ---- app ----
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// ---- env ----
 const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
 const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL || "";
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || "";
 
-// ---- tiny helpers for Upstash REST (memory) ----
+// ------- Upstash helpers (REST) -------
 async function redisGet(key) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
   const r = await fetch(`${UPSTASH_URL}/get/${encodeURIComponent(key)}`, {
     headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
   });
   if (!r.ok) return null;
-  const j = await r.json(); // { result: "..." } or { result: null }
+  const j = await r.json();
   return j?.result ?? null;
 }
 
@@ -42,79 +39,59 @@ async function redisSet(key, value) {
   return r.ok;
 }
 
-// ---- static client ----
+// ------- static client -------
 app.get("/", (_, res) => {
   res.sendFile(path.join(__dirname, "client.html"));
 });
 
-// ---- memory API ----
-// GET /memory/get?userId=...
+// ------- memory API -------
 app.get("/memory/get", async (req, res) => {
   const userId = (req.query.userId || "").toString().trim();
   if (!userId) return res.status(400).json({ error: "Missing userId" });
-
   const raw = await redisGet(`user:${userId}`);
   let memory = {};
-  try {
-    if (raw) memory = JSON.parse(raw);
-  } catch (_) {}
+  try { if (raw) memory = JSON.parse(raw); } catch {}
   res.json({ ok: true, memory });
 });
 
-// GET /memory/set?userId=...&field=name&value=Roman
 app.get("/memory/set", async (req, res) => {
   const userId = (req.query.userId || "").toString().trim();
   const field = (req.query.field || "").toString().trim();
   const value = (req.query.value || "").toString().trim();
-
   if (!userId) return res.status(400).json({ error: "Missing userId" });
   if (!field) return res.status(400).json({ error: "Missing field" });
 
   const key = `user:${userId}`;
   let obj = {};
   const existing = await redisGet(key);
-  if (existing) {
-    try {
-      obj = JSON.parse(existing) || {};
-    } catch (_) {}
-  }
+  if (existing) { try { obj = JSON.parse(existing) || {}; } catch {} }
   obj[field] = value;
 
   const saved = await redisSet(key, JSON.stringify(obj));
   res.json({ ok: saved, saved });
 });
 
-// ---- session API (uses REST, not SDK) ----
-// GET /session?userId=...
+// ------- session API (REST, NOT SDK) -------
 app.get("/session", async (req, res) => {
+  console.log("SESSION ROUTE: USING_FETCH_FOR_SESSION"); // marker
   try {
-    if (!OPENAI_API_KEY) {
-      return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
-    }
+    if (!OPENAI_API_KEY) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
 
     const userId = (req.query.userId || "").toString().trim();
-    const key = userId ? `user:${userId}` : null;
-
-    // pull memory to personalize the instructions
     let name = "";
-    try {
-      if (key) {
-        const raw = await redisGet(key);
-        if (raw) {
-          const m = JSON.parse(raw);
-          if (m?.name) name = m.name;
-        }
-      }
-    } catch (_) {}
+    if (userId) {
+      try {
+        const raw = await redisGet(`user:${userId}`);
+        if (raw) { const m = JSON.parse(raw); if (m?.name) name = m.name; }
+      } catch {}
+    }
 
     const instructions = [
       "You are Dummy, a concise, friendly voice assistant.",
       "Keep replies short unless asked.",
       "Speak when the user addresses you.",
       name ? `The user's name is ${name}. Greet them by name.` : "",
-    ]
-      .filter(Boolean)
-      .join(" ");
+    ].filter(Boolean).join(" ");
 
     const body = {
       model: "gpt-4o-realtime-preview-2024-12-17",
@@ -126,7 +103,6 @@ app.get("/session", async (req, res) => {
       metadata: userId ? { userId } : undefined,
     };
 
-    // Call REST directly — avoids SDK incompat issues
     const r = await fetch("https://api.openai.com/v1/realtime/sessions", {
       method: "POST",
       headers: {
@@ -139,21 +115,19 @@ app.get("/session", async (req, res) => {
 
     if (!r.ok) {
       const detail = await r.text();
-      return res
-        .status(500)
-        .json({ error: "session_create_failed", detail });
+      console.error("SESSION CREATE FAILED (REST):", detail);
+      return res.status(500).json({ error: "session_create_failed", detail });
     }
 
     const json = await r.json();
     return res.json(json);
   } catch (err) {
-    return res
-      .status(500)
-      .json({ error: "session_create_failed", detail: String(err) });
+    console.error("SESSION ROUTE ERROR:", err);
+    return res.status(500).json({ error: "session_create_failed", detail: String(err) });
   }
 });
 
-// ---- start ----
+// ------- start -------
 app.listen(PORT, () => {
   console.log(`Dummy server listening on :${PORT}`);
 });

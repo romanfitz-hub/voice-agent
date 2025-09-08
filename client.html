@@ -2,272 +2,246 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Voice Agent — Guarded v3 + Memory</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, sans-serif; margin: 16px; }
-    h1 { margin: 0 0 12px; }
-    button { font-size: 18px; padding: 10px 14px; margin: 8px 10px 8px 0; border-radius: 12px; border: none; background:#e5e7eb; }
-    button.primary { background:#e0e7ff; }
-    button[disabled] { opacity:.5 }
-    #log { white-space: pre-wrap; font-family: ui-monospace, Menlo, monospace; background:#f7f7f7; padding:12px; border-radius:12px; }
-    .card { background:#f3f4f6; padding:14px; border-radius:16px; margin: 12px 0; }
-    input { font-size: 18px; padding: 10px 12px; width: 100%; box-sizing: border-box; border-radius: 12px; border: 1px solid #ddd; }
-    .row { display:flex; gap:10px; align-items:center; margin: 6px 0; }
-    .row button { margin: 0; }
-    .pill { display:inline-block; background:#e5e7eb; padding:2px 8px; border-radius:999px; font-size:12px; margin-left:6px; }
+    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
+    h1 { font-size: 28px; margin-bottom: 16px; }
+    .card { background:#f2f2f2; padding:16px; border-radius:12px; margin:12px 0; }
+    .row { margin: 10px 0; }
+    input { width:100%; padding:12px; font-size:16px; border-radius:10px; border:1px solid #ccc; }
+    button { padding:12px 16px; border-radius:12px; border:0; background:#e6e6e6; font-size:18px; margin:6px 8px 6px 0; }
+    .ok { color: #0a8a00; font-weight:600; margin-left:8px; }
+    .err { color: #b00020; font-weight:600; margin-left:8px; }
+    pre { white-space: pre-wrap; background:#fafafa; padding:12px; border-radius:12px; border:1px solid #eee; }
+    small.mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+    ul { padding-left: 18px; }
+    li { margin: 4px 0; }
   </style>
 </head>
 <body>
   <h1>Voice Agent — Guarded v3 + Memory</h1>
 
   <div class="card">
-    <div><strong>Your Memory (saved to server)</strong></div>
-    <div id="uidRow" style="margin:8px 0 12px 0">
-      <span>User ID:</span>
-      <span id="uid" class="pill"></span>
+    <div class="row"><b>Your Memory (saved to server)</b></div>
+    <div class="row"><small class="mono">User ID: <span id="uid"></span></small>
+      <button id="copyUid">Copy</button></div>
+
+    <div class="row"><b>Name:</b></div>
+    <div class="row"><input id="name" placeholder="e.g., Alex Smith" /></div>
+    <div class="row">
+      <button id="saveName">Save</button><span id="saveNameStat"></span>
     </div>
 
+    <div class="row"><b>Kids:</b></div>
+    <div class="row"><input id="kids" placeholder="Comma-separated: Ava, Ben, Chris" /></div>
     <div class="row">
-      <label style="min-width:80px">Name:</label>
-      <input id="nameInput" placeholder="e.g., Alex Smith" />
-      <button id="saveNameBtn">Save</button>
-      <span id="nameSaveStatus" class="pill"></span>
+      <button id="saveKids">Save</button><span id="saveKidsStat"></span>
     </div>
 
+    <div class="row"><b>Tone:</b></div>
+    <div class="row"><input id="tone" placeholder="e.g., witty, concise, encouraging" /></div>
     <div class="row">
-      <label style="min-width:80px">Kids:</label>
-      <input id="kidsInput" placeholder="Comma-separated: Ava, Ben, Chris" />
-      <button id="saveKidsBtn">Save</button>
-      <span id="kidsSaveStatus" class="pill"></span>
+      <button id="saveTone">Save</button><span id="saveToneStat"></span>
     </div>
+
+    <div class="row"><b>Persona:</b></div>
+    <div class="row"><input id="persona" placeholder="e.g., friendly coach, upbeat coworker" /></div>
+    <div class="row">
+      <button id="savePersona">Save</button><span id="savePersonaStat"></span>
+    </div>
+
+    <div class="row"><b>Add note:</b></div>
+    <div class="row"><input id="note" placeholder="Any fact you want Dummy to remember" /></div>
+    <div class="row">
+      <button id="addNote">Add</button><span id="addNoteStat"></span>
+    </div>
+
+    <div class="row"><b>Notes:</b></div>
+    <div class="row"><ul id="notesList"></ul></div>
   </div>
 
   <div class="row">
-    <button id="beepWA">Beep (WebAudio)</button>
-    <button id="beepAT">Beep (AudioTag)</button>
+    <button id="beep1">Beep (WebAudio)</button>
+    <button id="beep2">Beep (AudioTag)</button>
   </div>
+
   <div class="row">
     <button id="nudge">Nudge audio</button>
     <button id="unlock">Unlock mic</button>
   </div>
+
   <div class="row">
-    <button id="start" class="primary">Start voice agent</button>
-    <button id="stop">Stop</button>
-    <button id="force">Force reply</button>
+    <button id="start">Start voice agent</button>
+    <button id="stop" disabled>Stop</button>
   </div>
 
-  <div style="margin:10px 0">Status: <strong id="status">idle</strong></div>
-  <div id="log"></div>
+  <div class="row">
+    <button id="force" disabled>Force reply</button>
+  </div>
 
-  <!-- hidden audio sink for remote stream -->
-  <audio id="remoteAudio" autoplay playsinline></audio>
+  <div class="row"><b>Status:</b> <span id="status">idle</span></div>
+  <pre id="log"></pre>
 
 <script>
-(() => {
-  // ---------- helpers ----------
-  const $ = (id) => document.getElementById(id);
-  const log = (...args) => { console.log(...args); const s = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' '); $('log').textContent += s + "\n"; };
-  const setStatus = (t) => $('status').textContent = t;
+const $ = (id) => document.getElementById(id);
+const log = (s) => { $("log").textContent += (s + "\n"); $("log").scrollTop = $("log").scrollHeight; };
+const setStatus = (s) => $("status").textContent = s;
 
-  // ---------- UI elements ----------
-  const btnBeepWA  = $('beepWA');
-  const btnBeepAT  = $('beepAT');
-  const btnNudge   = $('nudge');
-  const btnUnlock  = $('unlock');
-  const btnStart   = $('start');
-  const btnStop    = $('stop');
-  const btnForce   = $('force');
-  const nameInput  = $('nameInput');
-  const kidsInput  = $('kidsInput');
-  const nameSaveStatus = $('nameSaveStatus');
-  const kidsSaveStatus = $('kidsSaveStatus');
+function getUserId() {
+  let id = localStorage.getItem("dummy_user_id");
+  if (!id) { id = crypto.randomUUID(); localStorage.setItem("dummy_user_id", id); }
+  return id;
+}
+const userId = getUserId();
+$("uid").textContent = userId;
+$("copyUid").onclick = () => navigator.clipboard.writeText(userId);
 
-  const remoteAudio = $('remoteAudio');
+const statOk = (el)=>{ el.className="ok"; el.textContent="Saved ✓"; setTimeout(()=>{el.textContent="";},2000); };
+const statErr= (el)=>{ el.className="err"; el.textContent="Failed"; setTimeout(()=>{el.textContent="";},3000); };
 
-  // ---------- state ----------
-  const MODEL = "gpt-4o-realtime-preview-2024-12-17";
-  const VOICE = "verse";
-  const baseURL = location.origin;
+// ------- Memory UI -------
+async function loadMemory() {
+  try {
+    const r = await fetch(`/memory/get?userId=${encodeURIComponent(userId)}`);
+    const j = await r.json();
+    const m = j.memory || {};
+    $("name").value    = m.name    || "";
+    $("kids").value    = m.kids    || "";
+    $("tone").value    = m.tone    || "";
+    $("persona").value = m.persona || "";
+  } catch {}
+}
+async function listNotes() {
+  const r = await fetch(`/memory/notes/list?userId=${encodeURIComponent(userId)}`);
+  const j = await r.json();
+  const ul = $("notesList");
+  ul.innerHTML = "";
+  (j.notes || []).forEach(t => {
+    const li = document.createElement("li");
+    li.textContent = t;
+    ul.appendChild(li);
+  });
+}
+async function setMem(key, value, statEl) {
+  try {
+    const r = await fetch(`/memory/set?userId=${encodeURIComponent(userId)}&key=${encodeURIComponent(key)}&value=${encodeURIComponent(value)}`);
+    const j = await r.json();
+    if (j.ok) statOk(statEl); else statErr(statEl);
+  } catch { statErr(statEl); }
+}
+$("saveName").onclick    = () => setMem("name", $("name").value.trim(), $("saveNameStat"));
+$("saveKids").onclick    = () => setMem("kids", $("kids").value.trim(), $("saveKidsStat"));
+$("saveTone").onclick    = () => setMem("tone", $("tone").value.trim(), $("saveToneStat"));
+$("savePersona").onclick = () => setMem("persona", $("persona").value.trim(), $("savePersonaStat"));
+$("addNote").onclick     = async () => {
+  const text = $("note").value.trim();
+  if (!text) return;
+  try {
+    const r = await fetch("/memory/notes/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, text })
+    });
+    const j = await r.json();
+    if (j.ok) { statOk($("addNoteStat")); $("note").value = ""; listNotes(); }
+    else statErr($("addNoteStat"));
+  } catch { statErr($("addNoteStat")); }
+};
 
-  // use URL param `userId` if present, otherwise a stable default you’ve used earlier
-  const urlParams = new URLSearchParams(location.search);
-  const userId = urlParams.get("userId") || "e6c9ba1f-b388-49e4-95d6-8fff48d954d7"; // your ID
+// ------- Audio helpers -------
+$("beep1").onclick = () => {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const o = ctx.createOscillator(); o.frequency.value = 880;
+  const g = ctx.createGain(); g.gain.value = 0.05; o.connect(g); g.connect(ctx.destination);
+  o.start(); setTimeout(()=>{ o.stop(); ctx.close(); }, 160);
+  log("WebAudio beep");
+};
+$("beep2").onclick = () => {
+  const a = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQgAAAAA"); // tiny silent blip
+  a.play(); log("AudioTag beep");
+};
+$("nudge").onclick = () => $("beep1").click();
 
-  $('uid').textContent = userId;
+// ------- Realtime (WebRTC) -------
+let pc, dc, stream;
 
-  let pc = null;          // RTCPeerConnection
-  let dc = null;          // data channel
-  let micStream = null;   // MediaStream
+$("unlock").onclick = async () => {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    log("microphone OK");
+  } catch (e) { log("mic error: " + e); }
+};
 
-  // ---------- memory UI ----------
-  async function refreshMemoryUI() {
-    try {
-      const r = await fetch(`${baseURL}/memory/get?userId=${encodeURIComponent(userId)}`);
-      const j = await r.json();
-      log("memory/get:", j);
-      nameInput.value = j?.memory?.name || "";
-      kidsInput.value = Array.isArray(j?.memory?.kids) ? j.memory.kids.join(", ") : (j?.memory?.kids || "");
-    } catch (e) {
-      log("memory/get failed", e);
-    }
+$("start").onclick = async () => {
+  setStatus("starting…"); $("force").disabled = true; $("stop").disabled = false;
+
+  try {
+    // Ensure mic stream
+    if (!stream) stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    // Get ephemeral token + personalized instructions
+    log("start: step 3/7 fetch /session");
+    const sres = await fetch(`/session?userId=${encodeURIComponent(userId)}`);
+    const session = await sres.json();
+    log("start: got session");
+
+    // Create PeerConnection
+    log("start: step 5/7 create RTCPeerConnection");
+    pc = new RTCPeerConnection();
+    stream.getTracks().forEach(t => pc.addTrack(t, stream));
+
+    // Data channel for “force reply”
+    dc = pc.createDataChannel("oai-events");
+    dc.onopen = () => { $("force").disabled = false; log("datachannel open"); };
+    dc.onclose = () => { $("force").disabled = true; log("datachannel closed"); };
+
+    pc.oniceconnectionstatechange = () => log(`pc state: ${pc.iceConnectionState}`);
+    pc.onconnectionstatechange = () => log(`ice state: ${pc.connectionState}`);
+
+    log("start: step 6/7 createOffer & setLocalDescription");
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    // Send offer to OpenAI Realtime, auth with client_secret
+    log("start: step 7/7 POST offer to OpenAI");
+    const base = session.client_secret.value; // ephemeral key
+    const r = await fetch("https://api.openai.com/v1/realtime?model=" + encodeURIComponent(session.model), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${base}`, "Content-Type": "application/sdp" },
+      body: offer.sdp
+    });
+
+    const answer = { type: "answer", sdp: await r.text() };
+    await pc.setRemoteDescription(answer);
+
+    setStatus("listening");
+    log("connected ✓ (speak, or tap Force reply)");
+  } catch (e) {
+    setStatus("idle"); $("force").disabled = true; $("stop").disabled = true;
+    log("start error: " + e);
   }
+};
 
-  async function saveMem(key, value) {
-    const body = { userId, key, value };
-    try {
-      const r = await fetch(`${baseURL}/memory/set`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
-      });
-      const j = await r.json();
-      log("memory/set:", j);
-      return j?.ok === true;
-    } catch (e) {
-      log("memory/set failed", e);
-      return false;
+$("force").onclick = () => {
+  try {
+    if (dc && dc.readyState === "open") {
+      dc.send(JSON.stringify({ type: "response.create" }));
+      log("forced reply");
     }
-  }
+  } catch (e) { log("force error: " + e); }
+};
 
-  $('saveNameBtn').onclick = async () => {
-    nameSaveStatus.textContent = "saving…";
-    const ok = await saveMem("name", nameInput.value.trim());
-    nameSaveStatus.textContent = ok ? "Saved" : "Failed";
-  };
-  $('saveKidsBtn').onclick = async () => {
-    kidsSaveStatus.textContent = "saving…";
-    const v = kidsInput.value.trim();
-    const value = v.includes(",") ? v.split(",").map(s => s.trim()).filter(Boolean) : v;
-    const ok = await saveMem("kids", value);
-    kidsSaveStatus.textContent = ok ? "Saved" : "Failed";
-  };
+$("stop").onclick = () => {
+  try {
+    if (dc) dc.close();
+    if (pc) pc.close();
+    dc = null; pc = null;
+    setStatus("idle");
+  } catch {}
+};
 
-  // ---------- audio helpers ----------
-  btnBeepWA.onclick = () => {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const o = ctx.createOscillator(); o.frequency.value = 880;
-    const g = ctx.createGain(); g.gain.value = 0.05;
-    o.connect(g).connect(ctx.destination); o.start(); setTimeout(() => { o.stop(); }, 120);
-    log("WebAudio beep");
-  };
-  btnBeepAT.onclick = () => {
-    const a = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=");
-    a.play(); log("AudioTag beep");
-  };
-  btnNudge.onclick = btnBeepWA.onclick;
-
-  btnUnlock.onclick = async () => {
-    try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      log("microphone OK");
-    } catch (e) {
-      log("microphone error:", e);
-    }
-  };
-
-  // ---------- WebRTC start/stop ----------
-  btnStart.onclick = async () => {
-    setStatus("starting…");
-    $('log').textContent = "";
-
-    try {
-      if (!micStream) {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        log("microphone OK (auto)");
-      }
-
-      // 1) get a short-lived client secret from our server
-      log("start: step 3/7 fetch /session");
-      const s = await fetch(`${baseURL}/session?userId=${encodeURIComponent(userId)}`);
-      const session = await s.json();
-      if (!session?.client_secret?.value) throw new Error("No client secret from /session");
-      log("start: got session");
-
-      // 2) RTCPeerConnection
-      log("start: step 5/7 create RTCPeerConnection");
-      pc = new RTCPeerConnection();
-
-      // play remote audio
-      pc.ontrack = (ev) => {
-        remoteAudio.srcObject = ev.streams[0];
-      };
-
-      // data channel for events
-      dc = pc.createDataChannel("oai-events");
-      dc.onopen = () => { log("datachannel open"); setStatus("listening"); };
-      dc.onmessage = (e) => { log("event:", e.data.slice(0, 400)); };
-
-      // send microphone
-      micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
-
-      // 3) SDP offer → OpenAI
-      log("start: step 6/7 createOffer & setLocalDescription");
-      const offer = await pc.createOffer({ offerToReceiveAudio: true });
-      await pc.setLocalDescription(offer);
-
-      log("start: step 7/7 POST offer to OpenAI");
-      const resp = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(MODEL)}&voice=${encodeURIComponent(VOICE)}`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${session.client_secret.value}`,
-          "Content-Type": "application/sdp"
-        },
-        body: offer.sdp
-      });
-
-      const answer = { type: "answer", sdp: await resp.text() };
-      await pc.setRemoteDescription(answer);
-
-      pc.oniceconnectionstatechange = () => log("ice state:", pc.iceConnectionState);
-      pc.onconnectionstatechange = () => log("pc state:", pc.connectionState);
-
-      log("connected ✓ (speak, or tap Force reply)");
-    } catch (e) {
-      log("start error:", e.message || e.toString());
-      setStatus("idle");
-    }
-  };
-
-  btnStop.onclick = () => {
-    try {
-      if (dc && dc.readyState === "open") dc.close();
-      if (pc) pc.close();
-      dc = null; pc = null;
-      if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
-      remoteAudio.srcObject = null;
-      setStatus("idle");
-      log("stopping…");
-    } catch (e) {
-      log("stop error", e);
-    }
-  };
-
-  // Force the model to speak even if no VAD trigger happened
-  btnForce.onclick = () => {
-    try {
-      if (!dc || dc.readyState !== "open") { log("force: datachannel not open"); return; }
-      // optional: tell the server we’re done talking
-      dc.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-      // ask for a reply
-      const name = (nameInput.value || "").trim();
-      const greet = name ? `Say: Hello ${name}. I can hear you.` : "Say: Hello. I can hear you.";
-      dc.send(JSON.stringify({
-        type: "response.create",
-        response: {
-          modalities: ["audio"],
-          instructions: greet
-        }
-      }));
-      log("force: sent response.create");
-    } catch (e) {
-      log("force error:", e);
-    }
-  };
-
-  // boot
-  refreshMemoryUI();
-})();
+loadMemory(); listNotes();
 </script>
 </body>
 </html>

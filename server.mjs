@@ -4,7 +4,6 @@ import path from "path";
 import cors from "cors";
 import bodyParser from "body-parser";
 import { fileURLToPath } from "url";
-import OpenAI from "openai";
 
 // ---------- Setup ----------
 const __filename = fileURLToPath(import.meta.url);
@@ -103,7 +102,7 @@ app.post("/memory/notes/add", async (req, res) => {
   if (!userId || !text) return res.json({ ok: false, saved: false, error: "missing_user_or_text" });
 
   const ok = await redisLPush(notesKey(userId), text);
-  // trim to last 200
+  // optional best-effort trim to last 200
   try {
     await fetch(UPSTASH_URL, {
       method: "POST",
@@ -132,20 +131,18 @@ app.post("/memory/clear", async (req, res) => {
   return res.json({ ok: ok1 && ok2, cleared: ok1 && ok2 });
 });
 
-// ---------- Realtime session (personalized) ----------
+// ---------- Realtime session (explicit HTTP call w/ Beta header) ----------
 app.get("/session", async (req, res) => {
   try {
     const userId = (req.query.userId || "").trim();
-    const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-    // Profile
+    // Load profile + notes to personalize instructions
     let profile = {};
     try {
       const raw = userId ? await redisGet(profileKey(userId)) : null;
       profile = raw ? JSON.parse(raw) : {};
     } catch { profile = {}; }
 
-    // Last 20 notes
     const notes = userId ? await redisLRange(notesKey(userId), 0, 19) : [];
     const notesBlurb = notes.length
       ? "Known facts about the user:\n- " + notes.slice(0, 20).join("\n- ")
@@ -164,11 +161,31 @@ app.get("/session", async (req, res) => {
       notesBlurb
     ].filter(Boolean).join("\n");
 
-    const session = await openai.realtime.sessions.create({
-      model: "gpt-4o-realtime-preview-2024-12-17",
-      voice: "verse",
-      instructions
+    // Call the Realtime Sessions HTTP endpoint directly
+    const resp = await fetch("https://api.openai.com/v1/realtime/sessions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+        "OpenAI-Beta": "realtime=v1"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-realtime-preview-2024-12-17",
+        voice: "verse",
+        instructions
+      })
     });
+
+    const session = await resp.json();
+    if (!resp.ok) {
+      console.error("SESSION CREATE FAILED:", session);
+      return res.status(500).json({ error: "session_create_failed", detail: session });
+    }
+    // Must include client_secret for the browser to connect
+    if (!session.client_secret || !session.client_secret.value) {
+      console.error("SESSION MISSING client_secret:", session);
+      return res.status(500).json({ error: "session_missing_client_secret", detail: session });
+    }
 
     res.json(session);
   } catch (err) {

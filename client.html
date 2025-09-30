@@ -2,41 +2,33 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Dummy — Memory, Notes, Voice</title>
+  <title>Voice Agent — Memory + Realtime (fixed audio)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 22px; }
-    h1 { font-size: 26px; margin: 0 0 12px; }
-    .card { background:#f4f5f7; padding:14px; border-radius:12px; margin: 12px 0; }
-    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin: 8px 0; }
-    input { flex:1; min-width:220px; padding:10px 12px; font-size:16px; border-radius:10px; border:1px solid #ccc; }
-    button { padding:11px 14px; border-radius:12px; border:0; background:#e6e6e6; font-size:17px; }
-    button.primary { background:#dfe7ff; }
-    button[disabled]{ opacity:.55 }
-    pre { white-space: pre-wrap; background:#fbfbfb; padding:10px; border-radius:10px; border:1px solid #eee; max-height:40vh; overflow:auto; }
-    .ok { color:#11831b; font-weight:600; }
-    .err{ color:#b00020; font-weight:600; }
-    ul { padding-left:18px; }
-    li { margin:2px 0; }
+    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
+    h1 { font-size: 28px; margin-bottom: 16px; }
+    .card { background:#f2f2f2; padding:16px; border-radius:12px; margin:12px 0; }
+    .row { margin: 10px 0; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    input { flex:1; min-width:220px; padding:12px; font-size:16px; border-radius:10px; border:1px solid #ccc; }
+    button { padding:12px 16px; border-radius:12px; border:0; background:#e6e6e6; font-size:18px; }
+    .ok { color: #0a8a00; font-weight:600; }
+    .err { color: #b00020; font-weight:600; }
+    pre { white-space: pre-wrap; background:#fafafa; padding:12px; border-radius:12px; border:1px solid #eee; max-height:40vh; overflow:auto; }
+    small.mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
   </style>
 </head>
 <body>
-  <h1>Dummy — Memory, Notes, Voice</h1>
+  <h1>Voice Agent — Memory + Realtime</h1>
 
   <div class="card">
-    <div><b>Your Profile</b></div>
-    <div class="row"><small>User ID:</small><code id="uid"></code><button id="copyUid">Copy</button></div>
-    <div class="row"><b>Name</b><input id="name" placeholder="Roman" /><button id="saveName">Save</button><span id="saveNameStat"></span></div>
-    <div class="row"><b>Kids</b><input id="kids" placeholder="Comma-separated" /><button id="saveKids">Save</button><span id="saveKidsStat"></span></div>
-    <div class="row"><b>Tone</b><input id="tone" placeholder="witty, concise" /><button id="saveTone">Save</button><span id="saveToneStat"></span></div>
-    <div class="row"><b>Persona</b><input id="persona" placeholder="friendly coach" /><button id="savePersona">Save</button><span id="savePersonaStat"></span></div>
-  </div>
+    <div class="row"><b>Your Memory (saved to server)</b></div>
+    <div class="row"><small class="mono">User ID: <span id="uid"></span></small>
+      <button id="copyUid">Copy</button></div>
 
-  <div class="card">
-    <div class="row"><b>Notes</b></div>
-    <div class="row"><input id="note" placeholder="Add a note Dummy should remember" /><button id="addNote">Add</button><span id="addNoteStat"></span></div>
-    <div class="row"><button id="refreshNotes">Refresh</button><button id="reviewMem">Review Memory (speak)</button><button id="clearMem">Clear ALL</button><span id="clearStat"></span></div>
-    <ul id="notesList"></ul>
+    <div class="row"><b>Name:</b><input id="name" placeholder="e.g., Roman" /><button id="saveName">Save</button><span id="saveNameStat"></span></div>
+    <div class="row"><b>Kids:</b><input id="kids" placeholder="Comma-separated: Ava, Ben, Chris" /><button id="saveKids">Save</button><span id="saveKidsStat"></span></div>
+    <div class="row"><b>Tone:</b><input id="tone" placeholder="e.g., witty, concise, encouraging" /><button id="saveTone">Save</button><span id="saveToneStat"></span></div>
+    <div class="row"><b>Persona:</b><input id="persona" placeholder="e.g., friendly coach, upbeat coworker" /><button id="savePersona">Save</button><span id="savePersonaStat"></span></div>
   </div>
 
   <div class="row">
@@ -46,188 +38,175 @@
   </div>
 
   <div class="row">
-    <button id="start" class="primary">Start</button>
+    <button id="start">Start voice agent</button>
     <button id="force" disabled>Force reply</button>
-    <button id="stop" disabled>Stop (save summary)</button>
+    <button id="stop" disabled>Stop</button>
   </div>
 
   <div class="row"><b>Status:</b> <span id="status">idle</span></div>
   <pre id="log"></pre>
 
-  <!-- remote audio -->
+  <!-- IMPORTANT: this plays the remote audio -->
   <audio id="remoteAudio" autoplay playsinline></audio>
 
 <script>
-const $ = (id)=>document.getElementById(id);
-const log = (...a)=>{ const s=a.map(x=>typeof x==='string'?x:JSON.stringify(x)).join(' '); $("log").textContent+=s+"\n"; $("log").scrollTop=$("log").scrollHeight; };
-const setStatus=(t)=>$("status").textContent=t;
+const $ = (id) => document.getElementById(id);
+const log = (s) => { $("log").textContent += (s + "\n"); $("log").scrollTop = $("log").scrollHeight; };
+const setStatus = (s) => $("status").textContent = s;
 
-// --- stable userId ---
-function getUserId(){ let id=localStorage.getItem("dummy_user_id"); if(!id){ id=crypto.randomUUID(); localStorage.setItem("dummy_user_id",id);} return id;}
-const userId=getUserId(); $("uid").textContent=userId; $("copyUid").onclick=()=>navigator.clipboard.writeText(userId);
-
-// --- tiny helpers ---
-const ok=(el)=>{el.className="ok"; el.textContent="Saved ✓"; setTimeout(()=>{el.textContent=""; el.className=""},1800);}
-const err=(el)=>{el.className="err"; el.textContent="Failed"; setTimeout(()=>{el.textContent=""; el.className=""},2200)}
-
-// --- memory ui ---
-async function loadProfile(){
-  try{ const r=await fetch(`/memory/get?userId=${encodeURIComponent(userId)}`); const j=await r.json();
-    const m=j.memory||{}; $("name").value=m.name||""; $("kids").value=m.kids||""; $("tone").value=m.tone||""; $("persona").value=m.persona||"";
-  }catch{}
+// Stable userId (localStorage); keeps your memory consistent
+function getUserId() {
+  let id = localStorage.getItem("dummy_user_id");
+  if (!id) { id = crypto.randomUUID(); localStorage.setItem("dummy_user_id", id); }
+  return id;
 }
-async function setMem(key,val,el){
-  try{ const r=await fetch(`/memory/set?userId=${encodeURIComponent(userId)}&key=${encodeURIComponent(key)}&value=${encodeURIComponent(val)}`);
-    const j=await r.json(); j.ok?ok(el):err(el);
-  }catch{ err(el); }
-}
-$("saveName").onclick   =()=>setMem("name",$("name").value.trim(),$("saveNameStat"));
-$("saveKids").onclick   =()=>setMem("kids",$("kids").value.trim(),$("saveKidsStat"));
-$("saveTone").onclick   =()=>setMem("tone",$("tone").value.trim(),$("saveToneStat"));
-$("savePersona").onclick=()=>setMem("persona",$("persona").value.trim(),$("savePersonaStat"));
+const userId = getUserId();
+$("uid").textContent = userId;
+$("copyUid").onclick = () => navigator.clipboard.writeText(userId);
 
-async function listNotes(){
-  const ul=$("notesList"); ul.innerHTML="";
-  try{ const r=await fetch(`/memory/notes/list?userId=${encodeURIComponent(userId)}`); const j=await r.json();
-    (j.notes||[]).forEach(t=>{ const li=document.createElement("li"); li.textContent=t; ul.appendChild(li); });
-  }catch{}
+// ----- Memory UI -----
+async function loadMemory() {
+  try {
+    const r = await fetch(`/memory/get?userId=${encodeURIComponent(userId)}`);
+    const j = await r.json();
+    const m = j.memory || {};
+    $("name").value    = m.name    || "";
+    $("kids").value    = m.kids    || "";
+    $("tone").value    = m.tone    || "";
+    $("persona").value = m.persona || "";
+  } catch {}
 }
-$("refreshNotes").onclick=listNotes;
-$("addNote").onclick=async ()=>{
-  const text=$("note").value.trim(); if(!text) return;
-  try{
-    const r=await fetch("/memory/notes/add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({userId,text})});
-    const j=await r.json(); if(j.ok){ ok($("addNoteStat")); $("note").value=""; listNotes(); } else err($("addNoteStat"));
-  }catch{ err($("addNoteStat")); }
+async function setMem(key, value, el) {
+  try {
+    const r = await fetch(`/memory/set?userId=${encodeURIComponent(userId)}&key=${encodeURIComponent(key)}&value=${encodeURIComponent(value)}`);
+    const j = await r.json();
+    el.className = j.ok ? "ok" : "err";
+    el.textContent = j.ok ? "Saved ✓" : "Failed";
+    setTimeout(()=>{ el.textContent = ""; el.className=""; }, 2000);
+  } catch { el.className="err"; el.textContent="Failed"; }
+}
+$("saveName").onclick    = () => setMem("name", $("name").value.trim(), $("saveNameStat"));
+$("saveKids").onclick    = () => setMem("kids", $("kids").value.trim(), $("saveKidsStat"));
+$("saveTone").onclick    = () => setMem("tone", $("tone").value.trim(), $("saveToneStat"));
+$("savePersona").onclick = () => setMem("persona", $("persona").value.trim(), $("savePersonaStat"));
+
+// ----- Audio nudges -----
+$("beep1").onclick = () => {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const osc = ctx.createOscillator(); const g = ctx.createGain();
+  osc.frequency.value = 880; g.gain.value = 0.06;
+  osc.connect(g).connect(ctx.destination); osc.start();
+  setTimeout(()=>{ osc.stop(); ctx.close(); }, 150);
+  log("WebAudio beep");
 };
-$("reviewMem").onclick=()=>forceSay("Give me a quick friendly summary of my profile and last few notes.");
-$("clearMem").onclick=async()=>{
-  try{ const r=await fetch("/memory/clear",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({userId})});
-    const j=await r.json(); if(j.ok){ $("clearStat").className="ok"; $("clearStat").textContent="Cleared ✓"; listNotes(); loadProfile(); setTimeout(()=>{$("clearStat").textContent="";$("clearStat").className=""},1800);}
-    else{ $("clearStat").className="err"; $("clearStat").textContent="Failed"; }
-  }catch{ $("clearStat").className="err"; $("clearStat").textContent="Failed"; }
+$("beep2").onclick = () => {
+  const a = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQgAAAAA");
+  a.play(); log("AudioTag beep");
 };
 
-// --- audio nudges ---
-$("beep1").onclick=()=>{ const ctx=new (window.AudioContext||window.webkitAudioContext)(); const o=ctx.createOscillator(); const g=ctx.createGain();
-  o.frequency.value=880; g.gain.value=0.06; o.connect(g).connect(ctx.destination); o.start(); setTimeout(()=>{o.stop();ctx.close()},150); log("WebAudio beep"); };
-$("beep2").onclick=()=>{ const a=new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQgAAAAA"); a.play(); log("AudioTag beep"); };
-
-// --- realtime ---
+// ----- Realtime (WebRTC) -----
 let pc, dc, micStream;
-const remoteAudio=$("remoteAudio");
+const remoteAudio = $("remoteAudio");
 
-$("unlock").onclick=async()=>{ try{ micStream=await navigator.mediaDevices.getUserMedia({audio:true}); log("microphone OK"); }catch(e){ log("mic error: "+e); } };
+$("unlock").onclick = async () => {
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    log("microphone OK");
+  } catch (e) { log("mic error: " + e); }
+};
 
-$("start").onclick=async()=>{
-  setStatus("starting…"); $("force").disabled=true; $("stop").disabled=false;
-  try{
-    if(!micStream) micStream=await navigator.mediaDevices.getUserMedia({audio:true});
+$("start").onclick = async () => {
+  setStatus("starting…"); $("force").disabled = true; $("stop").disabled = false;
 
+  try {
+    if (!micStream) micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    // 1) Get ephemeral client_secret + personalized instructions
     log("start: step 3/7 fetch /session");
-    const sres=await fetch(`/session?userId=${encodeURIComponent(userId)}`); const session=await sres.json();
-    if(!session?.client_secret?.value) throw new Error("No client_secret in /session");
+    const sres = await fetch(`/session?userId=${encodeURIComponent(userId)}`);
+    const session = await sres.json();
+    if (!session?.client_secret?.value) throw new Error("No client_secret in /session");
     log("start: got session");
 
+    // 2) RTCPeerConnection
     log("start: step 5/7 create RTCPeerConnection");
-    pc=new RTCPeerConnection();
+    pc = new RTCPeerConnection();
 
-    pc.ontrack=(ev)=>{ remoteAudio.srcObject=ev.streams[0]; log("ontrack: remote audio attached"); };
-
-    dc=pc.createDataChannel("oai-events");
-    dc.onopen =()=>{ $("force").disabled=false; log("datachannel open"); };
-    dc.onmessage=(e)=>{
-      // Try to parse Realtime events; catch tool calls and SAVE_NOTE fallback
-      try{
-        const msg=JSON.parse(e.data);
-        // Look for tool calls (various message shapes guarded)
-        const calls = msg?.response?.tool_calls || msg?.tool_calls || [];
-        if (Array.isArray(calls) && calls.length){
-          calls.forEach(async (c)=>{
-            if(c?.name==="save_note"){
-              const text = c?.arguments?.text || c?.args?.text || "";
-              if(text){
-                await fetch("/memory/notes/add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({userId,text})});
-                log("tool: save_note → saved: "+text);
-              }
-            }
-          });
-        }
-        // Fallback: model embeds a literal SAVE_NOTE: <text>
-        const txt = msg?.output_text || msg?.text || "";
-        if (typeof txt === "string" && txt.includes("SAVE_NOTE:")){
-          const t = txt.split("SAVE_NOTE:")[1].trim();
-          if (t){
-            fetch("/memory/notes/add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({userId,text:t})});
-            log("fallback save: "+t);
-          }
-        }
-      }catch{ /* not JSON; ignore */ }
-      log("event: "+ (e.data.slice ? e.data.slice(0,300) : "[binary]"));
+    // ATTACH REMOTE AUDIO (this was missing before!)
+    pc.ontrack = (ev) => {
+      remoteAudio.srcObject = ev.streams[0];
+      log("ontrack: remote audio attached");
     };
 
-    micStream.getTracks().forEach(t=>pc.addTrack(t,micStream));
+    // data channel
+    dc = pc.createDataChannel("oai-events");
+    dc.onopen = () => { $("force").disabled = false; log("datachannel open"); };
+    dc.onmessage = (e) => { log("event: " + e.data.slice(0, 300)); };
 
+    // send mic
+    micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
+
+    // 3) Offer → OpenAI
     log("start: step 6/7 createOffer & setLocalDescription");
-    const offer=await pc.createOffer({offerToReceiveAudio:true});
+    const offer = await pc.createOffer({ offerToReceiveAudio: true });
     await pc.setLocalDescription(offer);
 
     log("start: step 7/7 POST offer to OpenAI");
-    const resp=await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(session.model)}&voice=verse`,{
-      method:"POST",
-      headers:{ Authorization:`Bearer ${session.client_secret.value}`, "Content-Type":"application/sdp" },
-      body:offer.sdp
+    const resp = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(session.model)}&voice=verse`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${session.client_secret.value}`,
+        "Content-Type": "application/sdp"
+      },
+      body: offer.sdp
     });
-    const answer={type:"answer", sdp:await resp.text()};
+
+    const answer = { type: "answer", sdp: await resp.text() };
     await pc.setRemoteDescription(answer);
 
-    pc.oniceconnectionstatechange=()=>log("pc state: "+pc.iceConnectionState);
-    pc.onconnectionstatechange =()=>log("ice state: "+pc.connectionState);
+    pc.oniceconnectionstatechange = () => log("pc state: " + pc.iceConnectionState);
+    pc.onconnectionstatechange = () => log("ice state: " + pc.connectionState);
 
     setStatus("listening");
-    log("connected ✓ (say “remember: …”, or tap Force reply)");
-  }catch(e){
-    setStatus("idle"); $("force").disabled=true; $("stop").disabled=true; log("start error: "+e);
+    log("connected ✓ (speak, or tap Force reply)");
+  } catch (e) {
+    setStatus("idle"); $("force").disabled = true; $("stop").disabled = true;
+    log("start error: " + e);
   }
 };
 
-function forceSay(instructions){
-  try{
-    if(!dc || dc.readyState!=="open"){ log("force: datachannel not open"); return; }
-    dc.send(JSON.stringify({ type:"response.create", response:{ modalities:["audio","text"], instructions } }));
-    log("force: response.create");
-  }catch(e){ log("force error: "+e); }
-}
-$("force").onclick=()=> {
-  const nm=$("name").value.trim();
-  const greet=nm?`Say: Hi ${nm}. I can hear you.`:"Say: Hello. I can hear you.";
-  forceSay(greet);
+$("force").onclick = () => {
+  try {
+    if (!dc || dc.readyState !== "open") { log("force: datachannel not open"); return; }
+
+    // Be explicit: ask for an audio reply so we hear something immediately
+    const name = $("name").value.trim();
+    const greet = name ? `Say: Hello ${name}. I can hear you.` : "Say: Hello. I can hear you.";
+
+    dc.send(JSON.stringify({
+      type: "response.create",
+      response: { modalities: ["audio"], instructions: greet }
+    }));
+
+    log("force: sent response.create");
+  } catch (e) { log("force error: " + e); }
 };
 
-// Stop + end-of-call summary (asks model to summarize and save via tool)
-$("stop").onclick=async()=>{
-  try{
-    if(dc && dc.readyState==="open"){
-      dc.send(JSON.stringify({ type:"response.create", response:{ modalities:["text"], instructions:"Create a one-sentence friendly summary of this session and call save_note with it as: \"Session: <summary>\". If tools are unavailable, include a line SAVE_NOTE: Session: <summary>." } }));
-      log("stop: asked model for session summary note");
-      // give it a moment to emit tool call before teardown
-      await new Promise(r=>setTimeout(r, 800));
-    }
-  }catch(e){ log("stop summary error: "+e); }
-
-  try{
-    if(dc) dc.close();
-    if(pc) pc.close();
-    dc=null; pc=null;
-    if(micStream){ micStream.getTracks().forEach(t=>t.stop()); micStream=null; }
-    $("force").disabled=true; $("stop").disabled=true;
+$("stop").onclick = () => {
+  try {
+    if (dc) dc.close();
+    if (pc) pc.close();
+    dc = null; pc = null;
+    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    remoteAudio.srcObject = null;
+    $("force").disabled = true; $("stop").disabled = true;
     setStatus("idle");
     log("stopped");
-  }catch{}
+  } catch {}
 };
 
 // Boot
-loadProfile(); listNotes();
+loadMemory();
 </script>
 </body>
 </html>

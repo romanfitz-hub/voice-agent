@@ -1,4 +1,4 @@
-// server.mjs
+// server.mjs — Memory + Realtime (REST) + Notes + Tools-ready
 import express from "express";
 import path from "path";
 import cors from "cors";
@@ -18,17 +18,17 @@ const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 // Upstash Redis REST (for memory)
-const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL;   // e.g. https://grand-swine-49302.upstash.io
-const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN; // long token
+const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL;
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 
-// ----- Upstash helpers (simple REST) -----
+// ----- Upstash helpers -----
 async function redisGet(key) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
   const res = await fetch(`${UPSTASH_URL}/get/${encodeURIComponent(key)}`, {
     headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` }
   });
   if (!res.ok) return null;
-  const data = await res.json(); // { result: "value" }
+  const data = await res.json();
   return data.result ?? null;
 }
 async function redisSet(key, value) {
@@ -54,7 +54,7 @@ async function redisLRange(key, start = 0, stop = -1) {
     { headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` } }
   );
   if (!res.ok) return [];
-  const data = await res.json(); // { result: [ ... ] }
+  const data = await res.json();
   return data.result ?? [];
 }
 async function redisDel(key) {
@@ -102,7 +102,7 @@ app.post("/memory/notes/add", async (req, res) => {
   if (!userId || !text) return res.json({ ok: false, saved: false, error: "missing_user_or_text" });
 
   const ok = await redisLPush(notesKey(userId), text);
-  // optional best-effort trim to last 200
+  // best-effort trim to last 200
   try {
     await fetch(UPSTASH_URL, {
       method: "POST",
@@ -119,7 +119,7 @@ app.post("/memory/notes/add", async (req, res) => {
 app.get("/memory/notes/list", async (req, res) => {
   const userId = (req.query.userId || "").trim();
   if (!userId) return res.json({ ok: true, notes: [] });
-  const items = await redisLRange(notesKey(userId), 0, -1);
+  const items = await redisLRange(notesKey(userId), 0, 19); // last 20
   return res.json({ ok: true, notes: items });
 });
 
@@ -131,12 +131,12 @@ app.post("/memory/clear", async (req, res) => {
   return res.json({ ok: ok1 && ok2, cleared: ok1 && ok2 });
 });
 
-// ---------- Realtime session (explicit HTTP call w/ Beta header) ----------
+// ---------- Realtime session (HTTP) ----------
 app.get("/session", async (req, res) => {
   try {
     const userId = (req.query.userId || "").trim();
 
-    // Load profile + notes to personalize instructions
+    // Load profile + last 20 notes
     let profile = {};
     try {
       const raw = userId ? await redisGet(profileKey(userId)) : null;
@@ -145,7 +145,7 @@ app.get("/session", async (req, res) => {
 
     const notes = userId ? await redisLRange(notesKey(userId), 0, 19) : [];
     const notesBlurb = notes.length
-      ? "Known facts about the user:\n- " + notes.slice(0, 20).join("\n- ")
+      ? "Known facts about the user:\n- " + notes.join("\n- ")
       : "";
 
     const name    = profile.name || "there";
@@ -153,15 +153,38 @@ app.get("/session", async (req, res) => {
     const persona = profile.persona || "helpful buddy";
     const kids    = profile.kids || "";
 
+    // Tools: allow the model to request saving a note.
+    const tools = [
+      {
+        type: "function",
+        name: "save_note",
+        description: "Save a concise memory/fact about the user for future conversations.",
+        parameters: {
+          type: "object",
+          properties: {
+            text: { type: "string", description: "The short note to remember." }
+          },
+          required: ["text"]
+        }
+      }
+    ];
+
+    const guardrails = `
+SYSTEM RULES:
+- If the user says "remember: <something>", call the tool save_note with that text, then briefly confirm ("Saved.").
+- If tools are not available, include a literal line "SAVE_NOTE: <text>" in your reply so the client can save it.
+- When the session is ending and you are asked for a "session summary", write ONE friendly sentence and call save_note with it as "Session: <summary>".
+`;
+
     const instructions = [
       `You are Dummy, a concise, friendly voice assistant.`,
       `Greet the user by name (${name}) when it fits.`,
       `Tone: ${tone}. Persona: ${persona}.`,
       kids ? `Kids: ${kids}.` : null,
-      notesBlurb
+      notesBlurb,
+      guardrails
     ].filter(Boolean).join("\n");
 
-    // Call the Realtime Sessions HTTP endpoint directly
     const resp = await fetch("https://api.openai.com/v1/realtime/sessions", {
       method: "POST",
       headers: {
@@ -172,7 +195,8 @@ app.get("/session", async (req, res) => {
       body: JSON.stringify({
         model: "gpt-4o-realtime-preview-2024-12-17",
         voice: "verse",
-        instructions
+        instructions,
+        tools
       })
     });
 
@@ -181,12 +205,10 @@ app.get("/session", async (req, res) => {
       console.error("SESSION CREATE FAILED:", session);
       return res.status(500).json({ error: "session_create_failed", detail: session });
     }
-    // Must include client_secret for the browser to connect
     if (!session.client_secret || !session.client_secret.value) {
       console.error("SESSION MISSING client_secret:", session);
       return res.status(500).json({ error: "session_missing_client_secret", detail: session });
     }
-
     res.json(session);
   } catch (err) {
     console.error("SESSION ERROR:", err);

@@ -35,7 +35,7 @@
   <header>
     <h1>Voice Agent — Memory + Realtime</h1>
     <div class="sub">
-      Say <span class="k">remember: …</span> while talking. The model will include <span class="k">SAVE_NOTE: …</span> and we’ll save it.
+      Say <span class="k">remember: …</span>. The model will include <span class="k">SAVE_NOTE: …</span> and we’ll save it.
       Use <span class="k">Force reply</span> if it goes quiet. On <span class="k">Stop</span>, we save a 3-bullet call snapshot.
     </div>
   </header>
@@ -103,7 +103,7 @@ const log = (s) => { $("log").textContent += (s + "\n"); $("log").scrollTop = $(
 const setStatus = (s) => $("status").textContent = s;
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&gt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 
-// Stable userId (localStorage); keeps your memory consistent
+// Stable userId (localStorage)
 function getUserId() {
   let id = localStorage.getItem("dummy_user_id");
   if (!id) { id = crypto.randomUUID(); localStorage.setItem("dummy_user_id", id); }

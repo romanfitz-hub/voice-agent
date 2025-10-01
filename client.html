@@ -7,7 +7,6 @@
   <style>
     /* ========= Penn State themed Clean & Airy =========
        Primary navy: #041E42 (Penn State Blue)
-       Supporting soft blues and neutrals for an airy feel
     */
     * { box-sizing: border-box; }
     html, body { width: 100%; max-width: 100%; overflow-x: hidden; }
@@ -19,8 +18,8 @@
       --line:#e7e9ee;
 
       --accent:#041E42;      /* Penn State Blue */
-      --accentSoft:#e9eef6;  /* light blue background chip */
-      --accentText:#0b3d91;  /* deep link-ish blue for chips */
+      --accentSoft:#e9eef6;  /* light blue chip */
+      --accentText:#0b3d91;  /* deep blue for chips */
       --shadow:0 6px 18px rgba(0,0,0,.06);
       --radius:14px;
     }
@@ -29,7 +28,6 @@
       margin:0; color:var(--ink); background:var(--bg);
     }
 
-    /* Header with a subtle navy glow */
     header{
       padding:22px;
       border-bottom:1px solid var(--line);
@@ -101,7 +99,6 @@
   <header>
     <h1>
       <span class="logo" aria-hidden="true">
-        <!-- Simple friendly face circle logo matching the accent -->
         <svg viewBox="0 0 24 24" fill="none">
           <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/>
           <path d="M8 13.5c2.2 1.8 5.8 1.8 8 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
@@ -175,9 +172,18 @@
 <script>
 /* ========= helpers ========= */
 const $ = (id) => document.getElementById(id);
-const log = (s) => { $("log").textContent += (s + "\\n"); $("log").scrollTop = $("log").scrollHeight; };
+const log = (s) => { $("log").textContent += (s + "\n"); $("log").scrollTop = $("log").scrollHeight; };
 const setStatus = (s) => $("status").textContent = s;
-const escapeHtml = (s) => String(s).replace(/[&<>\"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[m]));
+
+/* ✅ FIXED: correct escaping map (the previous version had a bad quote) */
+const escapeHtml = (s) =>
+  String(s).replace(/[&<>\"']/g, (m) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  }[m]));
 
 // Stable userId (localStorage) — keeps your memory consistent
 function getUserId() {
@@ -199,7 +205,7 @@ async function loadProfileMemory() {
     $("kids").value    = m.kids    || "";
     $("tone").value    = m.tone    || "";
     $("persona").value = m.persona || "";
-  } catch {}
+  } catch (e) { log("loadProfileMemory error: " + e); }
 }
 async function setMem(key, value, el) {
   try {
@@ -250,6 +256,8 @@ async function addNote(text) {
     log('NOTE saved: ' + note);
   } catch (e) { log('notes add error: ' + e); }
 }
+/* NOTE: Clear All calls a route that may not exist in your current server.
+   If it 404s, you can ignore the button or we can wire a /memory/notes/clear later. */
 async function clearNotes() {
   try {
     const r = await fetch(`/memory/notes/clear`, {
@@ -343,7 +351,6 @@ $("start").onclick = async () => {
 
       // TEXT deltas (if model ever streams text modality)
       if (data && data.type === 'response.output_text.delta' && typeof data.delta === 'string') {
-        // Prefer audio transcript; noop here.
         return;
       }
 
@@ -386,7 +393,6 @@ $("start").onclick = async () => {
 
 // Parse SAVE_NOTE lines only when a full transcript chunk completes
 function handleSaveNotesFrom(text) {
-  // Capture one or more "SAVE_NOTE: ..." lines in the transcript
   const matches = String(text).match(/SAVE_NOTE:\s*([^\n\r]+)/gi) || [];
   for (const m of matches) {
     const cleaned = m.replace(/^SAVE_NOTE:\s*/i, "").trim();
@@ -408,7 +414,7 @@ $("stop").onclick = async () => {
   try {
     setStatus("stopping…");
 
-    // Create end-of-call snapshot (3 bullets) and save as a note
+    // End-of-call snapshot (optional; will 404 if /summarize isn't on your server)
     try {
       const r = await fetch('/summarize', {
         method:'POST', headers:{'Content-Type':'application/json'},
@@ -418,7 +424,7 @@ $("stop").onclick = async () => {
       const summary = (j && j.summary) ? String(j.summary).trim() : '';
       if (summary) await addNote(summary);
     } catch (e) {
-      log('snapshot failed: ' + e);
+      log('snapshot failed (ok to ignore): ' + e);
     }
 
     if (dc) dc.close();

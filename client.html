@@ -51,4 +51,318 @@
           <span class="pill" id="status">idle</span>
         </div>
 
-        <div class="row"><b>Name:</b><input id="name" placeholder="
+        <div class="row"><b>Name:</b><input id="name" placeholder="e.g., Roman" /><button id="saveName">Save</button><span id="saveNameStat"></span></div>
+        <div class="row"><b>Kids:</b><input id="kids" placeholder="Comma-separated: Ava, Ben, Chris" /><button id="saveKids">Save</button><span id="saveKidsStat"></span></div>
+        <div class="row"><b>Tone:</b><input id="tone" placeholder="e.g., witty, concise, encouraging" /><button id="saveTone">Save</button><span id="saveToneStat"></span></div>
+        <div class="row"><b>Persona:</b><input id="persona" placeholder="e.g., friendly coach, upbeat coworker" /><button id="savePersona">Save</button><span id="savePersonaStat"></span></div>
+      </div>
+
+      <div class="row">
+        <button id="beep1">Beep (WebAudio)</button>
+        <button id="beep2">Beep (AudioTag)</button>
+        <button id="unlock">Unlock mic</button>
+      </div>
+
+      <div class="row">
+        <button id="start" class="primary">Start voice agent</button>
+        <button id="force" disabled>Force reply</button>
+        <button id="stop" class="warn" disabled>Stop</button>
+      </div>
+
+      <div class="card">
+        <b>Log</b>
+        <pre id="log"></pre>
+      </div>
+
+      <!-- IMPORTANT: this plays the remote audio -->
+      <audio id="remoteAudio" autoplay playsinline></audio>
+    </section>
+
+    <!-- RIGHT: Notes panel -->
+    <aside class="panel">
+      <div class="card">
+        <div class="notesHead">
+          <b>Notes</b>
+          <div>
+            <button id="refreshNotes">Refresh</button>
+            <button id="clearNotes">Clear All</button>
+          </div>
+        </div>
+        <div id="notesList"><div class="sub">No notes yet…</div></div>
+        <div class="sub" style="margin-top:8px">
+          Examples: <span class="k">remember: order more cups</span>, <span class="k">remember: greet Roman by name</span>.
+        </div>
+      </div>
+    </aside>
+  </main>
+
+<script>
+/* ========= helpers ========= */
+const $ = (id) => document.getElementById(id);
+const log = (s) => { $("log").textContent += (s + "\n"); $("log").scrollTop = $("log").scrollHeight; };
+const setStatus = (s) => $("status").textContent = s;
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&gt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+
+// Stable userId (localStorage); keeps your memory consistent
+function getUserId() {
+  let id = localStorage.getItem("dummy_user_id");
+  if (!id) { id = crypto.randomUUID(); localStorage.setItem("dummy_user_id", id); }
+  return id;
+}
+const userId = getUserId();
+$("uid").textContent = userId;
+$("copyUid").onclick = () => navigator.clipboard.writeText(userId);
+
+/* ========= Profile memory UI ========= */
+async function loadProfileMemory() {
+  try {
+    const r = await fetch(`/memory/get?userId=${encodeURIComponent(userId)}`);
+    const j = await r.json();
+    const m = j.memory || {};
+    $("name").value    = m.name    || "";
+    $("kids").value    = m.kids    || "";
+    $("tone").value    = m.tone    || "";
+    $("persona").value = m.persona || "";
+  } catch {}
+}
+async function setMem(key, value, el) {
+  try {
+    const r = await fetch(`/memory/set?userId=${encodeURIComponent(userId)}&key=${encodeURIComponent(key)}&value=${encodeURIComponent(value)}`);
+    const j = await r.json();
+    el.className = j.ok ? "ok" : "err";
+    el.textContent = j.ok ? "Saved ✓" : "Failed";
+    setTimeout(()=>{ el.textContent = ""; el.className=""; }, 2000);
+  } catch { el.className="err"; el.textContent="Failed"; }
+}
+$("saveName").onclick    = () => setMem("name", $("name").value.trim(), $("saveNameStat"));
+$("saveKids").onclick    = () => setMem("kids", $("kids").value.trim(), $("saveKidsStat"));
+$("saveTone").onclick    = () => setMem("tone", $("tone").value.trim(), $("saveToneStat"));
+$("savePersona").onclick = () => setMem("persona", $("persona").value.trim(), $("savePersonaStat"));
+
+/* ========= Notes panel ========= */
+const notesState = { items: [] };
+
+function renderNotes() {
+  const box = $("notesList");
+  if (!notesState.items.length) { box.innerHTML = `<div class="sub">No notes yet…</div>`; return; }
+  box.innerHTML = notesState.items.map(text => `
+    <div class="note">
+      <div>${escapeHtml(text)}</div>
+      <small>${new Date().toLocaleString()}</small>
+    </div>`).join('');
+}
+async function loadNotes() {
+  try {
+    const r = await fetch(`/memory/notes/list?userId=${encodeURIComponent(userId)}`);
+    const j = await r.json();
+    notesState.items = Array.isArray(j.notes) ? j.notes : [];
+    renderNotes();
+  } catch (e) { log('notes load error: ' + e); }
+}
+async function addNote(text) {
+  try {
+    const r = await fetch(`/memory/notes/add`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ userId, text })
+    });
+    if (!r.ok) throw new Error('notes add failed');
+    await loadNotes();
+    log('NOTE saved: ' + text);
+  } catch (e) { log('notes add error: ' + e); }
+}
+async function clearNotes() {
+  try {
+    const r = await fetch(`/memory/notes/clear`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ userId })
+    });
+    if (!r.ok) throw new Error('notes clear failed');
+    notesState.items = []; renderNotes();
+    log('notes cleared');
+  } catch (e) { log('notes clear error: ' + e); }
+}
+$("refreshNotes").onclick = () => loadNotes();
+$("clearNotes").onclick = () => { if (confirm('Clear all notes?')) clearNotes(); };
+
+/* ========= Audio nudges ========= */
+$("beep1").onclick = () => {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const osc = ctx.createOscillator(); const g = ctx.createGain();
+  osc.frequency.value = 880; g.gain.value = 0.06;
+  osc.connect(g).connect(ctx.destination); osc.start();
+  setTimeout(()=>{ osc.stop(); ctx.close(); }, 150);
+  log("WebAudio beep");
+};
+$("beep2").onclick = () => {
+  const a = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQgAAAAA");
+  a.play(); log("AudioTag beep");
+};
+
+/* ========= Realtime (WebRTC) ========= */
+let pc, dc, micStream;
+const remoteAudio = $("remoteAudio");
+
+// assistant transcript buffer for end-of-call summary
+const transcript = []; // {role:'assistant', text, t}
+let partial = '';      // incremental buffer
+
+$("unlock").onclick = async () => {
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    log("microphone OK");
+  } catch (e) { log("mic error: " + e); }
+};
+
+$("start").onclick = async () => {
+  setStatus("starting…"); $("force").disabled = true; $("stop").disabled = false;
+
+  try {
+    if (!micStream) micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    // 1) Get ephemeral client_secret + personalized instructions
+    log("start: step 3/7 fetch /session");
+    const sres = await fetch(`/session?userId=${encodeURIComponent(userId)}`);
+    const session = await sres.json();
+    if (!session?.client_secret?.value) throw new Error("No client_secret in /session");
+    log("start: got session");
+
+    // 2) RTCPeerConnection
+    log("start: step 5/7 create RTCPeerConnection");
+    pc = new RTCPeerConnection();
+
+    // attach remote audio
+    pc.ontrack = (ev) => {
+      remoteAudio.srcObject = ev.streams[0];
+      log("ontrack: remote audio attached");
+    };
+
+    // data channel
+    dc = pc.createDataChannel("oai-events");
+    dc.onopen = () => { $("force").disabled = true; log("datachannel open"); };
+
+    // Handle realtime events: parse JSON if possible; otherwise treat as text
+    dc.onmessage = (e) => {
+      const raw = e.data;
+      let data = raw;
+      try { data = JSON.parse(raw); } catch {/* maybe plain text */}
+
+      // Incremental assistant text deltas
+      if (data && data.type === 'response.output_text.delta' && typeof data.delta === 'string') {
+        partial += data.delta;
+        detectSaveNote(partial);
+        return;
+      }
+
+      // Response completed → stash into transcript
+      if (data && data.type === 'response.completed') {
+        const text = partial.trim();
+        if (text) {
+          transcript.push({ role:'assistant', text, t: Date.now() });
+          log("assistant: " + text.slice(0, 500));
+        }
+        partial = '';
+        return;
+      }
+
+      // Fallback: plain text
+      if (typeof data === 'string') {
+        partial += data;
+        detectSaveNote(partial);
+      }
+
+      // Log short
+      log("event: " + (typeof raw === 'string' ? raw.slice(0, 300) : JSON.stringify(raw).slice(0, 300)));
+    };
+
+    // send mic
+    micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
+
+    // 3) Offer → OpenAI
+    log("start: step 6/7 createOffer & setLocalDescription");
+    const offer = await pc.createOffer({ offerToReceiveAudio: true });
+    await pc.setLocalDescription(offer);
+
+    log("start: step 7/7 POST offer to OpenAI");
+    const resp = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(session.model)}&voice=verse`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${session.client_secret.value}`,
+        "Content-Type": "application/sdp"
+      },
+      body: offer.sdp
+    });
+
+    const answer = { type: "answer", sdp: await resp.text() };
+    await pc.setRemoteDescription(answer);
+
+    pc.oniceconnectionstatechange = () => log("pc state: " + pc.iceConnectionState);
+    pc.onconnectionstatechange = () => log("ice state: " + pc.connectionState);
+
+    setStatus("listening");
+    log("connected ✓ (speak, or tap Force reply)");
+  } catch (e) {
+    setStatus("idle"); $("force").disabled = true; $("stop").disabled = true;
+    log("start error: " + e);
+  }
+};
+
+// Detect lines like:  SAVE_NOTE: pick up cups
+function detectSaveNote(text) {
+  const m = text.match(/SAVE_NOTE:\s*(.+)/i);
+  if (m && m[1]) {
+    const note = m[1].trim();
+    const last = notesState.items[0] || '';
+    if (note && note !== last) addNote(note);
+  }
+}
+
+$("force").onclick = () => {
+  try {
+    if (!dc || dc.readyState !== "open") { log("force: datachannel not open"); return; }
+
+    const name = $("name").value.trim();
+    const greet = name ? `Say: Hello ${name}. I can hear you.` : "Say: Hello. I can hear you.";
+
+    dc.send(JSON.stringify({
+      type: "response.create",
+      response: { modalities: ["audio"], instructions: greet }
+    }));
+
+    log("force: sent response.create");
+  } catch (e) { log("force error: " + e); }
+};
+
+$("stop").onclick = async () => {
+  try {
+    setStatus("stopping…");
+
+    // Create end-of-call snapshot (3 bullets) and save as a note
+    try {
+      const r = await fetch('/summarize', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ userId, transcript })
+      });
+      const j = await r.json();
+      const summary = (j && j.summary) ? String(j.summary).trim() : '';
+      if (summary) await addNote(summary);
+    } catch (e) {
+      log('snapshot failed: ' + e);
+    }
+
+    if (dc) dc.close();
+    if (pc) pc.close();
+    dc = null; pc = null;
+    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    remoteAudio.srcObject = null;
+    $("force").disabled = true; $("stop").disabled = true;
+    setStatus("idle");
+    log("stopped");
+  } catch {}
+};
+
+// Boot
+loadProfileMemory();
+loadNotes();
+</script>
+</body>
+</html>

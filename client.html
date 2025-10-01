@@ -5,14 +5,21 @@
   <title>Voice Agent — Memory + Realtime (with Notes)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; max-width: 100%; overflow-x: hidden; }
     :root { --bg:#ffffff; --ink:#111; --muted:#666; --card:#f2f2f2; --line:#e9e9e9; }
     body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 0; background: var(--bg); color: var(--ink); }
-    header { padding: 18px 22px; border-bottom: 1px solid var(--line); }
+
+    header { padding: 18px 22px; border-bottom: 1px solid var(--line); max-width: 1100px; margin: 0 auto; }
     h1 { font-size: 22px; margin: 0 0 4px; }
     .sub { color: var(--muted); font-size: 13px; }
 
-    main { display: grid; grid-template-columns: 1fr 360px; gap: 16px; padding: 16px; }
-    .panel { background: var(--bg); }
+    main { display: grid; grid-template-columns: minmax(0,1fr) 360px; gap: 16px; padding: 16px; max-width: 1100px; margin: 0 auto; }
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr; }
+    }
+
+    .panel { background: var(--bg); min-width: 0; }
     .card { background: var(--card); padding:16px; border-radius:12px; margin:12px 0; }
     .row { margin: 10px 0; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
     input { flex:1; min-width:220px; padding:12px; font-size:16px; border-radius:10px; border:1px solid #ccc; background:#fff; }
@@ -21,7 +28,10 @@
     button.warn { background:#ffecec; }
     .ok { color: #0a8a00; font-weight:600; }
     .err { color: #b00020; font-weight:600; }
-    pre { white-space: pre-wrap; background:#fafafa; padding:12px; border-radius:12px; border:1px solid #eee; max-height:34vh; overflow:auto; margin:0; }
+
+    pre { white-space: pre-wrap; background:#fafafa; padding:12px; border-radius:12px; border:1px solid #eee; max-height:34vh; overflow:auto; margin:0;
+          overflow-wrap:anywhere; word-break:break-word; }
+
     small.mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
     .k { padding:2px 6px; border-radius:6px; background:#f6f6f6; border:1px solid #eee; font-family: ui-monospace, Menlo, Consolas, monospace; }
     .notesHead { display:flex; align-items:center; justify-content:space-between; margin-top:12px; }
@@ -29,13 +39,18 @@
     .note { background:#fff; border:1px solid #eee; border-radius:10px; padding:10px; margin:8px 0; }
     .note small { color:#777; display:block; margin-top:6px; }
     .pill { font-size:12px; padding:3px 8px; border-radius:999px; background:#f3f3f3; border:1px solid #e6e6e6; }
+
+    @media (max-width: 520px) {
+      .row { flex-direction: column; align-items: stretch; }
+      input, button { width: 100%; }
+    }
   </style>
 </head>
 <body>
   <header>
     <h1>Voice Agent — Memory + Realtime</h1>
     <div class="sub">
-      Say <span class="k">remember: …</span>. The model will include <span class="k">SAVE_NOTE: …</span> and we’ll save it.
+      Say <span class="k">remember: …</span>. The model will say a line with <span class="k">SAVE_NOTE: …</span> — we’ll save it as a Note.
       Use <span class="k">Force reply</span> if it goes quiet. On <span class="k">Stop</span>, we save a 3-bullet call snapshot.
     </div>
   </header>
@@ -103,7 +118,7 @@ const log = (s) => { $("log").textContent += (s + "\n"); $("log").scrollTop = $(
 const setStatus = (s) => $("status").textContent = s;
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&gt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 
-// Stable userId (localStorage)
+// Stable userId (localStorage) — keeps your memory consistent
 function getUserId() {
   let id = localStorage.getItem("dummy_user_id");
   if (!id) { id = crypto.randomUUID(); localStorage.setItem("dummy_user_id", id); }
@@ -141,6 +156,7 @@ $("savePersona").onclick = () => setMem("persona", $("persona").value.trim(), $(
 
 /* ========= Notes panel ========= */
 const notesState = { items: [] };
+let lastSavedNote = ""; // dedupe protection
 
 function renderNotes() {
   const box = $("notesList");
@@ -160,14 +176,17 @@ async function loadNotes() {
   } catch (e) { log('notes load error: ' + e); }
 }
 async function addNote(text) {
+  const note = String(text || "").trim();
+  if (!note || note === lastSavedNote) return;
   try {
     const r = await fetch(`/memory/notes/add`, {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ userId, text })
+      body: JSON.stringify({ userId, text: note })
     });
     if (!r.ok) throw new Error('notes add failed');
+    lastSavedNote = note;
     await loadNotes();
-    log('NOTE saved: ' + text);
+    log('NOTE saved: ' + note);
   } catch (e) { log('notes add error: ' + e); }
 }
 async function clearNotes() {
@@ -177,7 +196,8 @@ async function clearNotes() {
       body: JSON.stringify({ userId })
     });
     if (!r.ok) throw new Error('notes clear failed');
-    notesState.items = []; renderNotes();
+    notesState.items = []; lastSavedNote = "";
+    renderNotes();
     log('notes cleared');
   } catch (e) { log('notes clear error: ' + e); }
 }
@@ -202,9 +222,8 @@ $("beep2").onclick = () => {
 let pc, dc, micStream;
 const remoteAudio = $("remoteAudio");
 
-// assistant transcript buffer for end-of-call summary
+// Transcript buffer for end-of-call summary (assistant lines)
 const transcript = []; // {role:'assistant', text, t}
-let partial = '';      // incremental buffer
 
 $("unlock").onclick = async () => {
   try {
@@ -238,40 +257,40 @@ $("start").onclick = async () => {
 
     // data channel
     dc = pc.createDataChannel("oai-events");
-    dc.onopen = () => { $("force").disabled = true; log("datachannel open"); };
+    dc.onopen = () => { $("force").disabled = false; log("datachannel open"); };
 
-    // Handle realtime events: parse JSON if possible; otherwise treat as text
+    // === Handle realtime events ===
     dc.onmessage = (e) => {
-      const raw = e.data;
-      let data = raw;
-      try { data = JSON.parse(raw); } catch {/* maybe plain text */}
+      let data = e.data;
+      try { data = JSON.parse(e.data); } catch { /* sometimes plain text */ }
 
-      // Incremental assistant text deltas
-      if (data && data.type === 'response.output_text.delta' && typeof data.delta === 'string') {
-        partial += data.delta;
-        detectSaveNote(partial);
+      // 1) AUDIO transcript deltas (spoken assistant)
+      if (data && data.type === 'response.audio_transcript.delta' && typeof data.delta === 'string') {
+        // We only save on "done", so no work here (but you could live-preview if you want)
         return;
       }
 
-      // Response completed → stash into transcript
-      if (data && data.type === 'response.completed') {
-        const text = partial.trim();
-        if (text) {
-          transcript.push({ role:'assistant', text, t: Date.now() });
-          log("assistant: " + text.slice(0, 500));
+      // 2) AUDIO transcript done -> capture text, save notes, add to summary buffer
+      if (data && data.type === 'response.audio_transcript.done' && typeof data.transcript === 'string') {
+        const full = data.transcript.trim();
+        if (full) {
+          transcript.push({ role:'assistant', text: full, t: Date.now() });
+          log("assistant: " + full.slice(0, 500));
+          handleSaveNotesFrom(full);
         }
-        partial = '';
         return;
       }
 
-      // Fallback: plain text
-      if (typeof data === 'string') {
-        partial += data;
-        detectSaveNote(partial);
+      // 3) TEXT deltas (if model ever streams text modality)
+      if (data && data.type === 'response.output_text.delta' && typeof data.delta === 'string') {
+        // If your model ever sends text instead of audio, you can accumulate here.
+        // We still prefer the audio transcript for note capture.
+        return;
       }
 
       // Log short
-      log("event: " + (typeof raw === 'string' ? raw.slice(0, 300) : JSON.stringify(raw).slice(0, 300)));
+      const raw = typeof e.data === 'string' ? e.data : JSON.stringify(e.data);
+      log("event: " + raw.slice(0, 300));
     };
 
     // send mic
@@ -306,28 +325,22 @@ $("start").onclick = async () => {
   }
 };
 
-// Detect lines like:  SAVE_NOTE: pick up cups
-function detectSaveNote(text) {
-  const m = text.match(/SAVE_NOTE:\s*(.+)/i);
-  if (m && m[1]) {
-    const note = m[1].trim();
-    const last = notesState.items[0] || '';
-    if (note && note !== last) addNote(note);
+// Parse SAVE_NOTE lines only when a full transcript chunk completes
+function handleSaveNotesFrom(text) {
+  // Capture one or more "SAVE_NOTE: ..." lines in the transcript
+  const matches = String(text).match(/SAVE_NOTE:\s*([^\n\r]+)/gi) || [];
+  for (const m of matches) {
+    const cleaned = m.replace(/^SAVE_NOTE:\s*/i, "").trim();
+    if (cleaned) addNote(cleaned);
   }
 }
 
 $("force").onclick = () => {
   try {
     if (!dc || dc.readyState !== "open") { log("force: datachannel not open"); return; }
-
     const name = $("name").value.trim();
     const greet = name ? `Say: Hello ${name}. I can hear you.` : "Say: Hello. I can hear you.";
-
-    dc.send(JSON.stringify({
-      type: "response.create",
-      response: { modalities: ["audio"], instructions: greet }
-    }));
-
+    dc.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio"], instructions: greet } }));
     log("force: sent response.create");
   } catch (e) { log("force error: " + e); }
 };

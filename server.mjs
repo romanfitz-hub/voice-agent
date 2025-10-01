@@ -1,4 +1,4 @@
-// server.mjs — Memory + Realtime (REST) + Notes + Tools-ready
+// server.mjs — Memory + Realtime + Profile + Notes + Snapshot
 import express from "express";
 import path from "path";
 import cors from "cors";
@@ -21,7 +21,11 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 
-// ----- Upstash helpers -----
+// ---------- Static UI ----------
+app.get("/", (_, res) => res.sendFile(path.join(__dirname, "client.html")));
+app.get("/client.html", (_, res) => res.sendFile(path.join(__dirname, "client.html")));
+
+// ---------- Redis helpers ----------
 async function redisGet(key) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
   const res = await fetch(`${UPSTASH_URL}/get/${encodeURIComponent(key)}`, {
@@ -29,7 +33,7 @@ async function redisGet(key) {
   });
   if (!res.ok) return null;
   const data = await res.json();
-  return data.result ?? null;
+  return data.result ?? data.value ?? null;
 }
 async function redisSet(key, value) {
   if (!UPSTASH_URL || !UPSTASH_TOKEN) return false;
@@ -65,14 +69,11 @@ async function redisDel(key) {
   return res.ok;
 }
 
-// ---------- Memory keys ----------
+// ---------- Keys ----------
 const profileKey = (userId) => `mem:${userId}:profile`;
 const notesKey   = (userId) => `mem:${userId}:notes`;
 
-// ---------- Static UI ----------
-app.get("/", (_, res) => res.sendFile(path.join(__dirname, "client.html")));
-
-// ---------- Memory API ----------
+// ---------- Profile Memory API ----------
 app.get("/memory/get", async (req, res) => {
   const userId = (req.query.userId || "").trim();
   if (!userId) return res.json({ ok: true, memory: {} });
@@ -97,12 +98,13 @@ app.all("/memory/set", async (req, res) => {
   return res.json({ ok, saved: ok, profile });
 });
 
+// ---------- Notes API ----------
 app.post("/memory/notes/add", async (req, res) => {
   const { userId, text } = req.body || {};
   if (!userId || !text) return res.json({ ok: false, saved: false, error: "missing_user_or_text" });
 
   const ok = await redisLPush(notesKey(userId), text);
-  // best-effort trim to last 200
+  // Best-effort trim list to last 200 items
   try {
     await fetch(UPSTASH_URL, {
       method: "POST",
@@ -123,6 +125,15 @@ app.get("/memory/notes/list", async (req, res) => {
   return res.json({ ok: true, notes: items });
 });
 
+// Clear ONLY notes (keeps profile)
+app.post("/memory/notes/clear", async (req, res) => {
+  const { userId } = req.body || {};
+  if (!userId) return res.json({ ok: false, cleared: false, error: "missing_user" });
+  const ok = await redisDel(notesKey(userId));
+  return res.json({ ok, cleared: ok });
+});
+
+// Clear BOTH profile and notes (legacy)
 app.post("/memory/clear", async (req, res) => {
   const { userId } = req.body || {};
   if (!userId) return res.json({ ok: false, cleared: false, error: "missing_user" });
@@ -131,7 +142,7 @@ app.post("/memory/clear", async (req, res) => {
   return res.json({ ok: ok1 && ok2, cleared: ok1 && ok2 });
 });
 
-// ---------- Realtime session (HTTP) ----------
+// ---------- Realtime Session ----------
 app.get("/session", async (req, res) => {
   try {
     const userId = (req.query.userId || "").trim();
@@ -153,68 +164,11 @@ app.get("/session", async (req, res) => {
     const persona = profile.persona || "helpful buddy";
     const kids    = profile.kids || "";
 
-    // Tools: allow the model to request saving a note.
-    const tools = [
-      {
-        type: "function",
-        name: "save_note",
-        description: "Save a concise memory/fact about the user for future conversations.",
-        parameters: {
-          type: "object",
-          properties: {
-            text: { type: "string", description: "The short note to remember." }
-          },
-          required: ["text"]
-        }
-      }
-    ];
-
+    // Allow the model to indicate saves via a clear marker the client can parse.
     const guardrails = `
 SYSTEM RULES:
-- If the user says "remember: <something>", call the tool save_note with that text, then briefly confirm ("Saved.").
-- If tools are not available, include a literal line "SAVE_NOTE: <text>" in your reply so the client can save it.
-- When the session is ending and you are asked for a "session summary", write ONE friendly sentence and call save_note with it as "Session: <summary>".
-`;
-
-    const instructions = [
-      `You are Dummy, a concise, friendly voice assistant.`,
-      `Greet the user by name (${name}) when it fits.`,
-      `Tone: ${tone}. Persona: ${persona}.`,
-      kids ? `Kids: ${kids}.` : null,
-      notesBlurb,
-      guardrails
-    ].filter(Boolean).join("\n");
-
-    const resp = await fetch("https://api.openai.com/v1/realtime/sessions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-        "OpenAI-Beta": "realtime=v1"
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-realtime-preview-2024-12-17",
-        voice: "verse",
-        instructions,
-        tools
-      })
-    });
-
-    const session = await resp.json();
-    if (!resp.ok) {
-      console.error("SESSION CREATE FAILED:", session);
-      return res.status(500).json({ error: "session_create_failed", detail: session });
-    }
-    if (!session.client_secret || !session.client_secret.value) {
-      console.error("SESSION MISSING client_secret:", session);
-      return res.status(500).json({ error: "session_missing_client_secret", detail: session });
-    }
-    res.json(session);
-  } catch (err) {
-    console.error("SESSION ERROR:", err);
-    res.status(500).json({ error: "session_create_failed", detail: String(err) });
-  }
-});
-
-// ---------- Start ----------
-app.listen(PORT, () => console.log(`Server listening on :${PORT}`));
+- If the user says "remember: <something>" or "note: <something>", include a literal line exactly as:
+  SAVE_NOTE: <extracted text>
+  Put the note on a single line. Keep normal conversation around it if needed.
+- If asked to provide a "session summary", write one friendly sentence and also include:
+  SAVE_NOTE: Session: <that one-sent_

@@ -1,4 +1,4 @@
-// server.mjs — Memory + Realtime + Profile + Notes + Snapshot (hardened)
+// server.mjs — Profile memory + Notes + Realtime + Snapshot (stable v2)
 import express from "express";
 import path from "path";
 import cors from "cors";
@@ -120,7 +120,7 @@ app.post("/memory/notes/add", async (req, res) => {
 app.get("/memory/notes/list", async (req, res) => {
   const userId = (req.query.userId || "").trim();
   if (!userId) return res.json({ ok: true, notes: [] });
-  const items = await redisLRange(notesKey(userId), 0, 19);
+  const items = await redisLRange(notesKey(userId), 0, 19); // last 20
   return res.json({ ok: true, notes: items });
 });
 
@@ -132,5 +132,130 @@ app.post("/memory/notes/clear", async (req, res) => {
   return res.json({ ok, cleared: ok });
 });
 
-// Legacy: clear both profile and notes
-app.post("/memory/clea
+// Legacy: clear BOTH profile and notes
+app.post("/memory/clear", async (req, res) => {
+  const { userId } = req.body || {};
+  if (!userId) return res.json({ ok: false, cleared: false, error: "missing_user" });
+  const ok1 = await redisDel(profileKey(userId));
+  const ok2 = await redisDel(notesKey(userId));
+  return res.json({ ok: ok1 && ok2, cleared: ok1 && ok2 });
+});
+
+// ---------- Realtime Session ----------
+app.get("/session", async (req, res) => {
+  try {
+    const userId = (req.query.userId || "").trim();
+
+    // Load profile + recent notes
+    let profile = {};
+    try {
+      const raw = userId ? await redisGet(profileKey(userId)) : null;
+      profile = raw ? JSON.parse(raw) : {};
+    } catch { profile = {}; }
+
+    const notes = userId ? await redisLRange(notesKey(userId), 0, 19) : [];
+    const notesBlurb = notes.length ? ("Known facts about the user:\n- " + notes.join("\n- ")) : "";
+
+    const name    = profile.name || "there";
+    const tone    = profile.tone || "friendly, concise";
+    const persona = profile.persona || "helpful buddy";
+    const kids    = profile.kids || "";
+
+    // Guardrails (no backticks to avoid paste issues)
+    const guardrails = [
+      "SYSTEM RULES:",
+      "- If the user says \"remember: <something>\" or \"note: <something>\", include a literal line exactly as:",
+      "  SAVE_NOTE: <extracted text>",
+      "  Put the note on a single line. Keep normal conversation around it if needed.",
+      "- If asked to provide a \"session summary\", write one friendly sentence and also include:",
+      "  SAVE_NOTE: Session: <that one-sentence summary>",
+      "- Do not include SAVE_NOTE unless the user clearly asked to remember something, or at end-of-call summary when requested."
+    ].join("\n");
+
+    const parts = [
+      "You are Dummy, a concise, friendly voice assistant.",
+      "Greet the user by name (" + name + ") when it fits.",
+      "Tone: " + tone + ". Persona: " + persona + ".",
+      kids ? ("Kids: " + kids + ".") : "",
+      notesBlurb,
+      guardrails
+    ].filter(Boolean);
+    const instructions = parts.join("\n");
+
+    const model = "gpt-4o-realtime-preview-2024-12-17";
+
+    const resp = await fetch("https://api.openai.com/v1/realtime/sessions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+        "OpenAI-Beta": "realtime=v1"
+      },
+      body: JSON.stringify({
+        model,
+        voice: "verse",
+        instructions
+      })
+    });
+
+    const session = await resp.json();
+    if (!resp.ok) {
+      console.error("SESSION CREATE FAILED:", session);
+      return res.status(500).json({ error: "session_create_failed", detail: session });
+    }
+    if (!session.client_secret || !session.client_secret.value) {
+      console.error("SESSION MISSING client_secret:", session);
+      return res.status(500).json({ error: "session_missing_client_secret", detail: session });
+    }
+    return res.json({ ...session, model });
+  } catch (err) {
+    console.error("SESSION ERROR:", err);
+    res.status(500).json({ error: "session_create_failed", detail: String(err) });
+  }
+});
+
+// ---------- Summarize Transcript ----------
+app.post("/summarize", async (req, res) => {
+  try {
+    const { transcript = [], userId = "" } = req.body || {};
+    const assistantOnly = transcript
+      .filter(m => m && m.role === "assistant" && typeof m.text === "string" && m.text.trim())
+      .map(m => "- " + m.text.trim())
+      .join("\n");
+
+    const prompt = [
+      "You are a concise summarizer. Write exactly three bullet points capturing decisions, to-dos, and personal details to remember from the assistant's lines below.",
+      "Return ONLY the three bullets; no preface, no extra text.",
+      "",
+      "Assistant lines:",
+      assistantOnly || "- (no assistant lines recorded)"
+    ].join("\n");
+
+    const r = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        input: prompt
+      })
+    });
+
+    const j = await r.json();
+    const summary =
+      (j && j.output && j.output[0] && j.output[0].content && j.output[0].content[0] && j.output[0].content[0].text) ||
+      (j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) ||
+      (Array.isArray(j && j.output_text) ? j.output_text.join("") : "") ||
+      "";
+
+    return res.json({ ok: true, summary: String(summary || "").trim(), userId });
+  } catch (e) {
+    console.error("SUMMARIZE ERROR:", e);
+    return res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// ---------- Start ----------
+app.listen(PORT, () => console.log(`Server listening on :${PORT}`));
